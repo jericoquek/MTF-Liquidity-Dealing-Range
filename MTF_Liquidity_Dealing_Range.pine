@@ -1,0 +1,1742 @@
+//@version=6
+// MTF Liquidity Dealing Range
+//
+// Layer 1 - liquidity register.
+//   Sources: up to 5 MTF swing slots, 3 sessions, optional PDH/PDL.
+//   Only sources at or above the chart timeframe are used. No promotion.
+//   Levels anchor at the chart bar that actually printed the wick.
+//   Levels merge on a tick tolerance and union their tags; quotas are
+//   enforced per tag, so a level tagged 1h+4h keeps its 4h life when the
+//   1h quota ages it out.
+//   Sweep is by wick, touch counts, on confirmed bars only.
+//
+// Layer 2 - dealing range.
+//   No range exists until liquidity has framed one. The first registered
+//   purge opens one side; the opposing purge completes the pair. Only then
+//   is the range valid. The tracking side follows its excursion extreme.
+//   Two engines read the same purges and can be shown together:
+//     Rotation - any opposing purge re-anchors that side. The original engine.
+//     IPDA Frame - once framed, only a purge at or beyond a boundary moves it,
+//                and a purge only ever widens it. Internal sweeps are
+//                repricing. It contracts on time alone: no boundary may be
+//                older than the IPDA lookback of 20, 40 or 60 Daily bars.
+//   Delivery - its own toggle. A raid, then a confirmed close through the
+//     last opposing chart-TF swing. Raid extreme to displacement extreme.
+//   Ranging - candles building sideways and tight, printing relative equal
+//     highs and relative equal lows on the chart timeframe. While that box
+//     is live, sweeps of pools inside it reach none of the above.
+//   One primary range feeds everything downstream, including the
+//   premium / discount box.
+//
+// Revision notes
+//   - REVERSAL: premium / discount display reinstated, as a box split at
+//     0.5 only. This reverses the earlier removal of premium / discount
+//     shading as redundant.
+//   - Refinement ("most energetic swing") removed. Group 6 is now the
+//     delivery range.
+//   - Ranging added as group 10. Table moved to group 11.
+//   - Frame capped by an IPDA lookback. Without it a widen-only frame
+//     converged on the whole loaded history. Delivery moved to its own
+//     toggle in group 6.
+//   - Review fixes: a bar that takes both sides frames what it proves and
+//     suspends direction; primary falls back to a LIVE range; IPDA
+//     contraction waits for a full window; a contraction no longer reports
+//     as a liquidity reframe; Draw reached tests the pool that was the
+//     draw before the bar; wick cache 24; ranging OFF by default.
+//   - Volume profile placement: profile gap and profile width are independent.
+//     The histogram is anchored outside the primary range's right edge, so
+//     changing its width no longer drags it back over price or the P/D box.
+//   - The first complete pair fires Framed only, never Framed and Reframed
+//     together. Draw reached fires only when the exact registered pool that
+//     was the draw is swept - not when it is cleared by a day reset or
+//     trimmed by a quota.
+//   - Ranging rebuilt. It never fired below the register's finest source:
+//     the box was built from register swings (1H on a 5m chart) and a
+//     single wick one tick past an edge ended it. It now reads chart
+//     timeframe swings, needs relative equal highs and lows inside a width
+//     cap measured on the wicks, survives a poke that only prints another
+//     equal high or low, and ends on a close beyond an edge or a run
+//     through it. Past boxes stay on the chart. New alert: Ranging detected.
+//   - Ranging, second pass. Own swing length, separate from the register.
+//     Two equal highs only count as two when price pulled back a third of
+//     the box between them, same for lows. A box that begins right after a
+//     displacement candle may show one touch early. The box is drawn to
+//     the last candle inside it, not to the candle that broke it. The
+//     number of boxes kept on the chart is an input.
+//   - Ranging, third pass. Second early route: when the bodies of the
+//     last few candles sit inside a narrow band, a box may show on one
+//     equal high and one equal low. Bodies only decide when; the box is
+//     still drawn wick to wick. No early box, of either kind, may contain
+//     a displacement candle. Box border style is an input.
+//
+// Layer 3 - equilibrium, position, draw, table, alerts.
+//
+// Layer 5 - volume context. Optional. A volume profile binned by
+//   ATR and anchored to the live dealing range, plus the POC. Volume
+//   is spread across every row a bar's high-low range touches, so the
+//   node is where contracts changed hands, not where closes clustered.
+//   Not an ICT construct. It answers one question the range cannot:
+//   where the bulk of the business sits relative to equilibrium.
+//
+// Layer 4 - odds. Optional. Every live level is priced as a first
+//   passage probability, p = 1/(1+k), k being its distance in R.
+//   This is the driftless baseline: the odds of touching a target
+//   before a 1R stop when there is no edge at all. It detects
+//   nothing and predicts nothing. Its only use is as the number
+//   your read has to beat.
+
+indicator("MTF Liquidity Dealing Range", overlay = true, max_lines_count = 500, max_labels_count = 500, max_polylines_count = 100, max_boxes_count = 50, max_bars_back = 2000)
+
+// ═════════════════════════════════════════════════════════════
+// Types
+// ═════════════════════════════════════════════════════════════
+
+type Level
+    float  p
+    bool   hi
+    int    x        // origin time - the bar that printed the wick
+    int    born
+    string tags     // pipe delimited
+    bool   swept
+    int    sx       // sweep time
+    line   ln
+    label  lb
+    label  tx
+
+type Sess
+    float h
+    float l
+    int   hx
+    int   lx
+
+type Track
+    int   op
+    float h
+    float l
+    int   hx
+    int   lx
+    array<int> ops
+    array<int> hxs
+    array<int> lxs
+
+// a dealing-range engine: two boundaries, the side being tracked,
+// and this bar's events
+type Rng
+    float hi
+    int   hiT
+    int   hiB
+    bool  hiSet = false
+    float lo
+    int   loT
+    int   loB
+    bool  loSet = false
+    int   st = 0            // +1 tracking the high, -1 tracking the low
+    bool  amb = false       // sequence unknown after a double sweep
+    bool  reframed = false
+    bool  extended = false
+    bool  contracted = false
+
+// the delivery range: a raid arms it, a close through structure forms it
+type Dlv
+    int   pend = 0          // -1 armed after a buy-side raid, +1 after a sell-side raid
+    float pExt              // raid extreme while armed
+    int   pExtT
+    int   pExtB
+    float pOpp              // opposite extreme since the raid
+    int   pOppT
+    int   pOppB
+    float pMss              // the swing a close must break
+    int   dir = 0           // -1 bearish delivery, +1 bullish, 0 none
+    float hi
+    int   hiT
+    int   hiB
+    float lo
+    int   loT
+    int   loB
+    bool  formed = false
+    bool  extended = false
+
+// a chart-timeframe swing, for the ranging box
+type Swg
+    float p
+    bool  hi
+    int   t
+
+// ═════════════════════════════════════════════════════════════
+// Inputs
+// ═════════════════════════════════════════════════════════════
+
+gSrc = "1. Timeframes"
+levelsN = input.int(3, "Levels", minval = 1, maxval = 20, group = gSrc, tooltip = "Unswept levels kept per tag, per side.")
+mtfLen  = input.int(2, "Swing length", minval = 1, maxval = 10, group = gSrc)
+
+src1On = input.bool(true,  "TF 1", inline = "t1", group = gSrc)
+src1Tf = input.timeframe("60",  "", inline = "t1", group = gSrc)
+src2On = input.bool(true,  "TF 2", inline = "t2", group = gSrc)
+src2Tf = input.timeframe("240", "", inline = "t2", group = gSrc)
+src3On = input.bool(true,  "TF 3", inline = "t3", group = gSrc)
+src3Tf = input.timeframe("D",   "", inline = "t3", group = gSrc)
+src4On = input.bool(false, "TF 4", inline = "t4", group = gSrc)
+src4Tf = input.timeframe("W",   "", inline = "t4", group = gSrc)
+src5On = input.bool(false, "TF 5", inline = "t5", group = gSrc)
+src5Tf = input.timeframe("15",  "", inline = "t5", group = gSrc)
+
+gSess = "2. Sessions"
+s1On   = input.bool(false, "", inline = "s1", group = gSess)
+s1Name = input.string("A", "", inline = "s1", group = gSess)
+s1Time = input.session("1800-0100", "", inline = "s1", group = gSess)
+s1Col  = input.color(color.new(#424351, 50), "", inline = "s1", group = gSess)
+
+s2On   = input.bool(false, "", inline = "s2", group = gSess)
+s2Name = input.string("L", "", inline = "s2", group = gSess)
+s2Time = input.session("0100-0800", "", inline = "s2", group = gSess)
+s2Col  = input.color(color.new(#424351, 50), "", inline = "s2", group = gSess)
+
+s3On   = input.bool(false, "", inline = "s3", group = gSess)
+s3Name = input.string("N", "", inline = "s3", group = gSess)
+s3Time = input.session("0800-1200", "", inline = "s3", group = gSess)
+s3Col  = input.color(color.new(#424351, 50), "", inline = "s3", group = gSess)
+
+gDay = "3. Daily levels"
+pdOn       = input.bool(true,  "PDH / PDL", inline = "d", group = gDay, tooltip = "Taken from the symbol's completed Daily bar, so it agrees with what a Daily chart shows.")
+pdCol      = input.color(color.new(#424351, 50), "", inline = "d", group = gDay)
+dailyReset = input.bool(false, "Daily reset", group = gDay, tooltip = "Clear every level when the Daily bar rolls. Off clears only session and PDH/PDL levels.")
+
+gStyle = "4. Register style"
+lblSize     = input.string("Small", "Pane labels", options = ["Tiny", "Small", "Normal", "Large"], group = gStyle)
+colMtf      = input.color(color.new(#424351, 50), "Levels", inline = "c1", group = gStyle)
+regWidth    = input.int(1, "", minval = 1, maxval = 4, inline = "c1", group = gStyle)
+regStyle    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "c1", group = gStyle)
+showHistory = input.bool(true, "History", inline = "h", group = gStyle, tooltip = "Keep swept levels on the chart, terminated at their sweep bar and always drawn dotted. The colour and count on this row apply only when this is on.")
+historyN    = input.int(3, "", minval = 1, maxval = 100, inline = "h", group = gStyle)
+colSwept    = input.color(color.new(#424351, 50), "", inline = "h", group = gStyle)
+showRegister = input.bool(true, "Show register", group = gStyle)
+showOrigin  = input.bool(true,  "Origin labels", inline = "v", group = gStyle)
+showMarker  = input.bool(false, "Pending markers", inline = "v", group = gStyle)
+maxDistAtr  = input.float(0, "Hide beyond (x ATR)", minval = 0, maxval = 50, step = 0.5, group = gStyle, tooltip = "0 draws every level. Otherwise levels further than this many ATR from price are hidden until price approaches.")
+mergeTicks  = input.int(2, "Merge tolerance (ticks)", minval = 0, maxval = 50, group = gStyle, tooltip = "A merged tag set should mean the same structural price, not merely nearby swings. Keep this tight.")
+
+gRange = "5. Dealing range"
+rotOn   = input.bool(true,  "Rotation range", group = gRange, tooltip = "The original engine. Any opposing registered purge re-anchors that side at the purging bar, so a retracement that takes internal liquidity re-anchors the range to that rotation.")
+frameOn = input.bool(false, "IPDA Frame", inline = "fr", group = gRange)
+ipdaLb  = input.int(20, "IPDA lookback (days)", options = [20, 40, 60], inline = "fr", group = gRange, tooltip = "IPDA Frame: external context, not a second dealing range. Framed the same way as Rotation, but once both sides are set only a purge of a pool at or beyond a boundary moves it, and a purge only widens it. Internal sweeps are repricing. It contracts on time: any boundary older than the lookback is re-anchored to that side's extreme inside the window, at the bar that printed it. The window is the current Daily bar plus the previous lookback-1, recalculated every day, so it agrees with the same count on a Daily chart. Until the chart holds a full window of Daily bars, no contraction happens and the frame is marked not ready with the days actually loaded - a 60D frame is never silently computed on fewer days.")
+primSel = input.string("Rotation", "Primary range", options = ["Rotation", "IPDA Frame", "Delivery"], group = gRange, tooltip = "The range the box, EQ, position, draw marker, boundary odds, volume profile, table and alerts all measure against. The primary draws solid with the labels below; any other range that is on draws quieter. If the chosen range is not live, it falls back to the first LIVE range in the order Rotation, IPDA Frame, Delivery, and the table marks the fallback.")
+showHi = input.bool(true, "Range high", inline = "rh", group = gRange)
+colHi  = input.color(#2962FF, "", inline = "rh", group = gRange)
+txtHi  = input.string("DR HIGH", "", inline = "rh", group = gRange)
+widHi  = input.int(1, "", minval = 1, maxval = 4, inline = "rh", group = gRange)
+
+showLo = input.bool(true, "Range low", inline = "rl", group = gRange)
+colLo  = input.color(#F23645, "", inline = "rl", group = gRange)
+txtLo  = input.string("DR LOW", "", inline = "rl", group = gRange)
+widLo  = input.int(1, "", minval = 1, maxval = 4, inline = "rl", group = gRange)
+
+showEq = input.bool(true, "Equilibrium", inline = "eq", group = gRange)
+colEq  = input.color(#787B86, "", inline = "eq", group = gRange)
+txtEq  = input.string("DR EQ", "", inline = "eq", group = gRange)
+widEq  = input.int(1, "", minval = 1, maxval = 4, inline = "eq", group = gRange)
+showPrice  = input.bool(true, "Show price on labels", group = gRange)
+extendBars = input.int(12, "Extend right (bars)", minval = 1, maxval = 200, group = gRange)
+edgeTrigger = input.bool(false, "Boundary violation counts as a purge", group = gRange, tooltip = "Off: only a registered liquidity sweep transitions the range, which is the faithful reading. On: price trading through a boundary also transitions it, which stops a stale boundary being drawn through price when no pool sits there.")
+boxOn   = input.bool(true, "Premium / discount box", group = gRange, tooltip = "Drawn over the primary range and split at 0.5 only: 1 at the high, 0 at the low. Its midline replaces the EQ stroke; the EQ label and its odds stay. PREMIUM and DISCOUNT text takes each half's colour at full strength.")
+colPrem = input.color(color.new(#787B86, 88), "Premium", inline = "bx", group = gRange)
+colDisc = input.color(color.new(#C9A227, 90), "Discount", inline = "bx", group = gRange)
+colMid  = input.color(#E0A800, "Midline", inline = "bx", group = gRange)
+
+gRef = "6. Delivery range"
+dlvOn  = input.bool(false, "Delivery range", inline = "rf", group = gRef)
+colRef = input.color(#FF9800, "", inline = "rf", group = gRef)
+widRef = input.int(1, "", minval = 1, maxval = 4, inline = "rf", group = gRef, tooltip = "A registered purge arms it; a confirmed CLOSE through the last opposing chart-TF swing forms it - close, not wick, so the next stop run cannot pass as displacement. It runs from the raid extreme to the displacement extreme, which keeps extending with price. It ends when price takes the raid extreme back, or when a newer raid and close through structure forms. No ATR threshold, no ranking, no FVG requirement.")
+
+gDraw = "7. Draw"
+showDraw = input.bool(true, "Mark the draw", inline = "dw", group = gDraw)
+colDraw  = input.color(#FFEB3B, "", inline = "dw", group = gDraw)
+
+gOdds = "8. Odds"
+oddsOn    = input.bool(true, "Show odds", group = gOdds, tooltip = "Prices every live level as p = 1/(1+k), where k is its distance in R. That is the first-passage probability of reaching the level before a 1R stop for a driftless process - the no-edge baseline. It is not a forecast and not a signal. Whatever edge your read has is the amount by which it must beat this number.")
+oddsRisk  = input.string("ATR multiple", "Risk from", options = ["ATR multiple", "Manual points", "Distance to last swing"], group = gOdds, tooltip = "The denominator. It must not be the dealing range itself - risk measured to the opposite boundary makes the odds column print your position in the range and nothing else. Last swing uses the register's own swing length and is side-aware: a level above price is priced against the drop to the last swing low, a level below it against the rise to the last swing high.")
+oddsAtrX  = input.float(1.5, "…ATR multiple", minval = 0.1, maxval = 20, step = 0.1, group = gOdds)
+oddsManPt = input.float(0, "…Manual points", minval = 0, group = gOdds)
+oddsCost  = input.float(1.5, "Round-trip cost (points)", minval = 0, step = 0.25, group = gOdds, tooltip = "Commission plus expected slippage, both ways, in points. Above zero a second figure appears: the win rate needed after cost, which is the baseline times (1 + cost/R). Net expectancy on this model is minus the cost in R at every distance, so the stop in points is the only lever that moves it.")
+oddsCapR  = input.float(6, "Price levels out to (R)", minval = 0.5, maxval = 50, step = 0.5, group = gOdds, tooltip = "Levels beyond this are left unpriced. The cap sets the floor odds you will ever see printed: 6R is 14%, 8R is 11%, 4R is 20%.")
+oddsAll   = input.bool(true, "Price register levels", group = gOdds, tooltip = "Off prices only the range boundaries, EQ and the draw.")
+oddsDim   = input.bool(true, "Dim below one-in-three", inline = "od", group = gOdds, tooltip = "Fades register levels beyond 2R, where distance alone has already decided them. The figure is ADDED to the level colour's own transparency, so with the register at 50% a fade of 25 lands at 75%. Keep the sum under about 85 or faded levels disappear rather than recede.")
+oddsFade  = input.int(25, "", minval = 0, maxval = 90, inline = "od", group = gOdds)
+
+gVc = "9. Volume context"
+vcOn       = input.bool(false, "Enable volume context", group = gVc, tooltip = "A volume profile and point of control anchored to the live dealing range. Nothing is computed or drawn until a range exists, and the whole thing recomputes when the range reframes. Not an ICT construct - treat it as context, not a signal.")
+vcPocShow  = input.bool(true, "POC line", inline = "vp", group = gVc, tooltip = "The single highest-volume row in the range. Drawn from the older of the two boundary anchors and extended right with the range lines.")
+vcPocCol   = input.color(#E8A33D, "", inline = "vp", group = gVc)
+vcPocWid   = input.int(2, "", minval = 1, maxval = 4, inline = "vp", group = gVc)
+vcProfShow  = input.bool(false, "Volume profile", inline = "vf", group = gVc, tooltip = "The full histogram. It is anchored outside the primary range / premium-discount box instead of against the last candle. Off by default - the POC line carries most of the information.")
+vcProfCol   = input.color(color.new(#424351, 50), "", inline = "vf", group = gVc)
+vcProfFill  = input.int(88, "", minval = 0, maxval = 100, inline = "vf", group = gVc)
+vcProfGap   = input.int(8, "Profile gap (bars)", minval = 0, maxval = 100, inline = "vg", group = gVc, tooltip = "Empty space between the right edge of the primary range / premium-discount box and the nearest edge of the widest volume-profile row.")
+vcProfWidth = input.int(32, "Profile width (bars)", minval = 5, maxval = 150, inline = "vg", group = gVc, tooltip = "Maximum histogram width. This changes the profile width without changing its gap from the range box.")
+vcAtrLen   = input.int(100, "ATR length", minval = 5, maxval = 500, inline = "vb", group = gVc)
+vcBinMult  = input.float(0.2, "x", minval = 0.02, maxval = 2.0, step = 0.02, inline = "vb", group = gVc, tooltip = "Row height is ATR times this multiplier, so rows scale to volatility rather than to a fixed tick count. Lower is finer and costs more to compute.")
+vcMaxRows  = input.int(150, "Max rows", minval = 10, maxval = 400, group = gVc, tooltip = "Caps the row count on very tall ranges. When the cap bites, row height is recomputed so the rows still tile the range exactly.")
+vcMaxLook  = input.int(1000, "Max lookback (bars)", minval = 50, maxval = 1900, group = gVc, tooltip = "Safety cap. If the range anchor is older than this, the profile starts here instead of at the anchor.")
+
+gRg = "10. Ranging (experimental)"
+rgOn   = input.bool(false, "Detect ranging", group = gRg, tooltip = "An implementation rule, not part of the dealing-range definition. Ranging is candles building sideways and tight, printing relative equal highs and relative equal lows. It is read from the chart timeframe's own swings, so it works on any timeframe whatever the register holds. While a box is live, sweeps of pools strictly inside it reach no range engine - no range can open, frame or reframe on them. The register still marks them swept. A wick that only prints another equal high or low stretches the box. A close beyond an edge, or a wick that runs through it, ends the box, and that purge passes through as the first side. A new box can only be built from swings formed after that break. The box cannot appear before its second equal high and second equal low have confirmed. Switch off for a pure baseline comparison.")
+rgLen  = input.int(2, "Swing length", minval = 1, maxval = 10, group = gRg, tooltip = "Bars either side of a swing high or low, on the chart timeframe. Ranging only - the register keeps its own swing length in group 1. 2 is the tested default. 1 confirms a swing one bar after it prints, so boxes show sooner, but there are more of them and some break up.")
+rgAtrX = input.float(3.5, "Max width (x ATR)", minval = 0.5, maxval = 20, step = 0.5, group = gRg, tooltip = "How tall the box may be, wick to wick, in chart ATR(14). This is what tight means. Calibrated on hand-marked consolidations on a 5m chart: they measured 1.9 to 3.4. Raise it and wider chop qualifies; go too far and a dealing range with rotation inside it gets treated as chop.")
+rgMin  = input.int(2, "Min swings per side", minval = 2, maxval = 6, group = gRg, tooltip = "How many relative equal highs at the top of the box, and relative equal lows at the bottom, each. Two highs only count as two when price pulled back at least a third of the box between them, and the same for lows, so one visit to an edge is one touch. 2 is the earliest a box can show. 3 waits for a third touch on both sides: fewer boxes, later.")
+rgEqX  = input.float(0.5, "Equal tolerance (x ATR)", minval = 0.05, maxval = 3, step = 0.05, group = gRg, tooltip = "How close to the box edge a swing must sit to count as a relative equal high or low, in chart ATR(14). The same distance decides the break: a wick past an edge by less than this is another equal high or low and the box stretches to it; by more than this the edge has been run and the box ends.")
+rgEarly = input.bool(true, "Early after displacement", inline = "re", group = gRg)
+rgDispX = input.float(1.5, "body x ATR", minval = 0.5, maxval = 10, step = 0.25, inline = "re", group = gRg, tooltip = "A box whose first candle comes within 6 candles after a displacement candle may show one touch early: two equal highs and one low, or two lows and one high. Those boxes are labelled Ranging (early). A displacement candle is one whose body is at least this many times the ATR(14) of the candle before it. A big candle does not predict a consolidation on its own - this only shortens the wait when one does follow. No early box may contain a displacement candle. Untick to wait for the full count every time.")
+rgBody  = input.bool(true, "Early on tight bodies", inline = "rb", group = gRg)
+rgBodyN = input.int(6, "candles", minval = 3, maxval = 30, inline = "rb", group = gRg)
+rgBodyW = input.float(1.0, "band x ATR", minval = 0.25, maxval = 5, step = 0.25, inline = "rb", group = gRg, tooltip = "When the bodies of the last N candles all sit inside a band this many chart ATR(14) tall, a box may show on one equal high and one equal low. Those boxes are labelled Ranging (tight). Bodies only decide when the box may show - it is still drawn wick to wick, highest high to lowest low. The box must span those N candles and may not contain a displacement candle. Tested steady from 6 to 8 candles and a band up to 1.25; at 1.5 it starts boxing ordinary pauses. Expect more short boxes in a quiet market. Untick to wait for the swing count.")
+rgShow = input.bool(true, "Show box", inline = "rg", group = gRg)
+rgCol  = input.color(color.new(#7E57C2, 30), "", inline = "rg", group = gRg)
+rgSty  = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "rg", group = gRg)
+rgKeep = input.int(5, "Boxes shown", minval = 1, maxval = 40, group = gRg, tooltip = "How many ranging boxes stay on the chart, newest first. Older ones are removed.")
+
+gTbl = "11. Table"
+tblOn     = input.bool(false, "Show table", group = gTbl)
+tblPos    = input.string("Top right", "Position", options = ["Top right", "Top left", "Bottom right", "Bottom left", "Middle right"], group = gTbl)
+tblSize   = input.string("Normal", "Text size", options = ["Tiny", "Small", "Normal", "Large"], group = gTbl)
+tblTxt    = input.color(color.new(#424351, 50), "Text", inline = "tb", group = gTbl)
+tblBg     = input.color(#F4F4F7, "Background", inline = "tb", group = gTbl)
+tblBorder = input.color(#F4F4F7, "Border", inline = "tb", group = gTbl)
+
+// ═════════════════════════════════════════════════════════════
+// State
+// ═════════════════════════════════════════════════════════════
+
+const int MAX_SWEPT  = 200
+const int MAX_SCAN   = 500
+const int WICK_CACHE = 24
+const float RG_PULL  = 0.33   // pullback between two equal highs or lows, as a share of the box
+const int RG_DISP_W  = 6      // candles after a displacement in which a box may begin early
+
+var array<Level> live = array.new<Level>()
+var array<Level> done = array.new<Level>()
+
+var array<Sess> ses = array.from(Sess.new(na, na, na, na), Sess.new(na, na, na, na), Sess.new(na, na, na, na))
+
+// 5 MTF slots plus one for the daily bar used by PDH/PDL
+var array<Track> tr = array.from(
+     Track.new(na, na, na, na, na, array.new_int(), array.new_int(), array.new_int()),
+     Track.new(na, na, na, na, na, array.new_int(), array.new_int(), array.new_int()),
+     Track.new(na, na, na, na, na, array.new_int(), array.new_int(), array.new_int()),
+     Track.new(na, na, na, na, na, array.new_int(), array.new_int(), array.new_int()),
+     Track.new(na, na, na, na, na, array.new_int(), array.new_int(), array.new_int()),
+     Track.new(na, na, na, na, na, array.new_int(), array.new_int(), array.new_int()))
+
+var array<string> sNames = array.from(s1Name, s2Name, s3Name)
+var array<color>  sCols  = array.from(s1Col, s2Col, s3Col)
+var array<string> baseTf = array.from(src1Tf, src2Tf, src3Tf, src4Tf, src5Tf)
+var array<bool>   baseOn = array.from(src1On, src2On, src3On, src4On, src5On)
+
+var array<string> useTf  = array.new_string(5, "")
+var array<bool>   useSrc = array.new_bool(5, false)
+
+var bool poolHi = false
+var bool poolLo = false
+var string poolHiTag = ""
+var string poolLoTag = ""
+var float sweptHiMax = na   // highest buy-side pool swept on this bar
+var float sweptLoMin = na   // lowest sell-side pool swept on this bar
+var float drawPrev = na     // the draw pool coming into this bar
+var int   drawPrevSide = 0  // 1 buy-side, -1 sell-side
+bool      drawSwept = false // that exact pool was swept on this bar
+
+// the volume profile reads high/low/volume back to the range anchor,
+// which is deeper than the register's wick scan needs
+const int VC_BUF = 2000
+
+max_bars_back(time, MAX_SCAN)
+max_bars_back(high, VC_BUF)
+max_bars_back(low, VC_BUF)
+max_bars_back(volume, VC_BUF)
+
+// ═════════════════════════════════════════════════════════════
+// Helpers
+// ═════════════════════════════════════════════════════════════
+
+f_size(string s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        => size.small
+
+f_tsize(string s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        => size.normal
+
+f_pos(string s) =>
+    switch s
+        "Top right"    => position.top_right
+        "Top left"     => position.top_left
+        "Bottom right" => position.bottom_right
+        "Bottom left"  => position.bottom_left
+        "Middle right" => position.middle_right
+        => position.top_right
+
+f_lnStyle() =>
+    switch regStyle
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+
+fmt_tick(float p) =>
+    na(p) ? "—" : str.tostring(math.round_to_mintick(p), format.mintick)
+
+f_label(string name, float p) =>
+    showPrice and not na(p) ? name + " " + fmt_tick(p) : name
+
+tfSec(string tf) => timeframe.in_seconds(tf)
+
+hasTag(string tags, string tag) => str.contains("|" + tags + "|", "|" + tag + "|")
+
+addTag(string tags, string tag) =>
+    hasTag(tags, tag) ? tags : str.length(tags) == 0 ? tag : tags + "|" + tag
+
+delTag(string tags, string tag) =>
+    s = str.replace_all("|" + tags + "|", "|" + tag + "|", "|")
+    str.length(s) <= 2 ? "" : str.substring(s, 1, str.length(s) - 1)
+
+tagText(string tags) => str.replace_all(tags, "|", ",")
+
+tfText(string tf) =>
+    string outp = tf
+    n = str.tonumber(tf)
+    if tf == "M" or tf == "1M"
+        outp := "1M"
+    else if tf == "W" or tf == "1W"
+        outp := "1W"
+    else if tf == "D" or tf == "1D"
+        outp := "1D"
+    else if not na(n)
+        m = int(n)
+        if m < 60
+            outp := str.tostring(m) + "m"
+        else if m < 1440 and m % 60 == 0
+            outp := str.tostring(int(m / 60)) + "h"
+        else if m >= 1440 and m % 1440 == 0
+            outp := str.tostring(int(m / 1440)) + "D"
+        else
+            outp := str.tostring(m) + "m"
+    outp
+
+hasTf(array<string> a, string tf) =>
+    bool hit = false
+    if a.size() > 0
+        for i = 0 to a.size() - 1
+            if not hit and tfSec(a.get(i)) == tfSec(tf)
+                hit := true
+    hit
+
+// No promotion. A source at or above the chart TF is used as given.
+// A source finer than the chart is unusable and is skipped.
+resolveSources() =>
+    used = array.new_string()
+    cs = timeframe.in_seconds()
+    for i = 0 to 4
+        tf = baseTf.get(i)
+        ok = baseOn.get(i) and tfSec(tf) >= cs and not hasTf(used, tf)
+        useSrc.set(i, ok)
+        if ok
+            used.push(tf)
+            useTf.set(i, tf)
+        else
+            useTf.set(i, timeframe.period)
+    0
+
+// ── wick cache ───────────────────────────────────────────────
+
+method archive(Track x) =>
+    if not na(x.op)
+        x.ops.unshift(x.op)
+        x.hxs.unshift(x.hx)
+        x.lxs.unshift(x.lx)
+        if x.ops.size() > WICK_CACHE
+            o1 = x.ops.pop()
+            o2 = x.hxs.pop()
+            o3 = x.lxs.pop()
+    0
+
+method trackWick(Track x, int op) =>
+    if not na(op)
+        if na(x.op)
+            x.op := op
+            x.h  := high
+            x.l  := low
+            x.hx := time
+            x.lx := time
+        else if op != x.op
+            x.archive()
+            x.op := op
+            x.h  := high
+            x.l  := low
+            x.hx := time
+            x.lx := time
+        else
+            if high >= x.h
+                x.h  := high
+                x.hx := time
+            if low <= x.l
+                x.l  := low
+                x.lx := time
+    0
+
+method wick(Track x, int op, bool hi) =>
+    int outp = na
+    if not na(op) and x.ops.size() > 0
+        for i = 0 to x.ops.size() - 1
+            if na(outp) and x.ops.get(i) == op
+                outp := hi ? x.hxs.get(i) : x.lxs.get(i)
+    outp
+
+anchorSlow(float p, bool hi, int op, int cl) =>
+    int outp = op
+    if not na(p) and not na(op) and not na(cl)
+        lim = math.min(bar_index, MAX_SCAN - 1)
+        int i = 0
+        bool stop = false
+        while i <= lim and not stop
+            bt = time[i]
+            if bt < op
+                stop := true
+            else if bt >= op and bt < cl
+                bp = hi ? high[i] : low[i]
+                if math.abs(bp - p) <= syminfo.mintick * 0.5
+                    outp := bt
+                    stop := true
+            if not stop
+                i += 1
+    outp
+
+anchor(int id, float p, bool hi, int op, int cl, string tf) =>
+    int outp = na
+    if tfSec(tf) > timeframe.in_seconds()
+        outp := tr.get(id).wick(op, hi)
+    else
+        outp := op          // source equals the chart TF: the pivot bar is the chart bar
+    na(outp) ? anchorSlow(p, hi, op, cl) : outp
+
+// ═════════════════════════════════════════════════════════════
+// Levels
+// ═════════════════════════════════════════════════════════════
+
+barMs  = timeframe.in_seconds(timeframe.period) * 1000
+tol    = syminfo.mintick * mergeTicks
+xRight = time + barMs * extendBars
+atrVal = ta.atr(14)
+visLim = maxDistAtr > 0 ? maxDistAtr * nz(atrVal, 0) : float(na)
+
+// ── odds ─────────────────────────────────────────────────────
+// p = 1/(1+k) is the probability of touching a target k·R away
+// before a 1R stop, for a process with no drift. It follows from
+// optional stopping: p·b - (1-p)·a = 0, so p = a/(a+b), and the
+// R's cancel. Gross expectancy is identically zero at every k.
+// With a cost c expressed in R, net expectancy is -c at every k
+// and the break-even win rate is p·(1+c). Nothing below forecasts
+// anything; the denominator is the only term that can be improved.
+
+riskFlat = oddsRisk == "Manual points" ? oddsManPt : nz(atrVal, 0) * oddsAtrX
+
+var float oSwHi = na
+var float oSwLo = na
+oPh = ta.pivothigh(high, mtfLen, mtfLen)
+oPl = ta.pivotlow(low,  mtfLen, mtfLen)
+if not na(oPh)
+    oSwHi := oPh
+if not na(oPl)
+    oSwLo := oPl
+
+// side-aware structural risk, with a fall back to the flat figure
+riskUp = not na(oSwLo) and close - oSwLo > 0 ? close - oSwLo : riskFlat
+riskDn = not na(oSwHi) and oSwHi - close > 0 ? oSwHi - close : riskFlat
+
+f_risk(bool above) =>
+    r = oddsRisk == "Distance to last swing" ? (above ? riskUp : riskDn) : riskFlat
+    na(r) or r <= 0 ? float(na) : r
+
+f_k(float lvl) =>
+    r = f_risk(lvl > close)
+    na(r) or na(lvl) ? float(na) : math.abs(lvl - close) / r
+
+f_p(float k) => na(k) ? float(na) : 1.0 / (1.0 + k)
+
+pctTxt(float p) => na(p) ? "—" : str.tostring(math.round(p * 100)) + "%"
+
+oddsLbl(float lvl) =>
+    string outp = ""
+    if oddsOn and not na(lvl)
+        k = f_k(lvl)
+        if not na(k) and k <= oddsCapR
+            p = f_p(k)
+            r = f_risk(lvl > close)
+            outp := str.tostring(k, "#.#") + "R · " + pctTxt(p)
+            if oddsCost > 0 and not na(r)
+                outp := outp + " (need " + pctTxt(math.min(1.0, p * (1.0 + oddsCost / r))) + ")"
+    outp
+
+f_label2(string name, float p) =>
+    base = f_label(name, p)
+    od = oddsLbl(p)
+    str.length(od) > 0 ? base + "  " + od : base
+
+lvlColor(Level x) =>
+    color c = x.swept ? colSwept : colMtf
+    if not x.swept
+        for i = 0 to sNames.size() - 1
+            if hasTag(x.tags, sNames.get(i))
+                c := sCols.get(i)
+        if hasTag(x.tags, "PDH") or hasTag(x.tags, "PDL")
+            c := pdCol
+        if oddsOn and oddsAll and oddsDim
+            pk = f_p(f_k(x.p))
+            if not na(pk) and pk < 1.0 / 3.0
+                c := color.new(c, math.min(100, color.t(c) + oddsFade))
+    c
+
+markText(Level x) =>
+    tg = showOrigin ? tagText(x.tags) : ""
+    od = oddsAll and not x.swept ? oddsLbl(x.p) : ""
+    if str.length(od) > 0
+        tg := str.length(tg) > 0 ? tg + "  " + od : od
+    mk = showMarker ? "◎" : ""
+    both = str.length(tg) > 0 and str.length(mk) > 0
+    x.hi ? (both ? tg + "\n" + mk : tg + mk) : (both ? mk + "\n" + tg : tg + mk)
+
+lblStyle(bool hi) => hi ? label.style_label_down : label.style_label_up
+
+method restyle(Level x) =>
+    c = lvlColor(x)
+    if not na(x.ln)
+        line.set_color(x.ln, c)
+        line.set_width(x.ln, regWidth)
+        line.set_style(x.ln, x.swept ? line.style_dotted : f_lnStyle())
+    if not na(x.lb)
+        label.set_text(x.lb, markText(x))
+        label.set_textcolor(x.lb, c)
+    if not na(x.tx)
+        label.set_text(x.tx, tagText(x.tags))
+        label.set_textcolor(x.tx, c)
+    0
+
+method advance(Level x, int xr, float lim) =>
+    if not x.swept
+        bool vis = na(lim) or math.abs(x.p - close) <= lim
+        hidden = color.new(color.black, 100)
+        if not na(x.ln)
+            line.set_x2(x.ln, xr)
+            line.set_color(x.ln, vis ? lvlColor(x) : hidden)
+        if not na(x.lb)
+            label.set_textcolor(x.lb, vis ? lvlColor(x) : hidden)
+            // odds move with price, so the text is rewritten per bar
+            if oddsOn and oddsAll
+                label.set_text(x.lb, markText(x))
+    0
+
+method kill(Level x) =>
+    if not na(x.ln)
+        line.delete(x.ln)
+    if not na(x.lb)
+        label.delete(x.lb)
+    if not na(x.tx)
+        label.delete(x.tx)
+    0
+
+removeLive(int id) =>
+    x = live.get(id)
+    x.kill()
+    r = live.remove(id)
+    0
+
+removeDone(int id) =>
+    x = done.get(id)
+    x.kill()
+    r = done.remove(id)
+    0
+
+removeTagAt(int id, string tag) =>
+    x = live.get(id)
+    x.tags := delTag(x.tags, tag)
+    if str.length(x.tags) == 0
+        removeLive(id)
+    else
+        live.set(id, x)
+        x.restyle()
+    0
+
+clearTag(string tag) =>
+    int i = live.size() - 1
+    while i >= 0
+        x = live.get(i)
+        if hasTag(x.tags, tag)
+            removeTagAt(i, tag)
+        i -= 1
+    0
+
+clearAll() =>
+    while live.size() > 0
+        removeLive(live.size() - 1)
+    while done.size() > 0
+        removeDone(done.size() - 1)
+    0
+
+pruneDone() =>
+    while done.size() > MAX_SWEPT
+        removeDone(0)
+    0
+
+hideOldSweeps() =>
+    n = done.size()
+    if n > historyN
+        for i = 0 to n - historyN - 1
+            x = done.get(i)
+            if not na(x.ln)
+                line.delete(x.ln)
+                x.ln := na
+            if not na(x.tx)
+                label.delete(x.tx)
+                x.tx := na
+            done.set(i, x)
+    0
+
+markSwept(Level x, int st) =>
+    x.swept := true
+    x.sx := st
+    if not na(x.lb)
+        label.delete(x.lb)
+        x.lb := na
+    if not na(x.ln)
+        line.set_x2(x.ln, st)
+    if showHistory and showRegister and showOrigin
+        mid = x.x + int((st - x.x) / 2)
+        x.tx := label.new(mid, x.p, tagText(x.tags), xloc = xloc.bar_time, yloc = yloc.price, style = lblStyle(x.hi), color = color.new(color.black, 100), textcolor = colSwept, size = f_size(lblSize), textalign = text.align_center)
+    else if not showHistory
+        if not na(x.ln)
+            line.delete(x.ln)
+            x.ln := na
+    x.restyle()
+    0
+
+addLevel(float raw, bool hi, int ox, string tag) =>
+    if not na(raw) and not na(ox) and str.length(tag) > 0
+        p = math.round_to_mintick(raw)
+        int id = -1
+        int i = 0
+        while i < live.size() and id == -1
+            x = live.get(i)
+            if x.hi == hi and math.abs(x.p - p) <= tol
+                id := i
+            i += 1
+
+        if id >= 0
+            x = live.get(id)
+            x.tags := addTag(x.tags, tag)
+            if ox < x.x
+                x.x := ox
+                if not na(x.ln)
+                    line.set_x1(x.ln, ox)
+                if not na(x.lb)
+                    label.set_x(x.lb, ox)
+            live.set(id, x)
+            x.restyle()
+        else
+            nx = Level.new(p, hi, ox, bar_index, tag, false, na, na, na, na)
+            c  = lvlColor(nx)
+            if showRegister
+                nx.ln := line.new(ox, p, xRight, p, xloc = xloc.bar_time, color = c, width = regWidth, style = f_lnStyle())
+                if showOrigin or showMarker
+                    nx.lb := label.new(ox, p, markText(nx), xloc = xloc.bar_time, yloc = yloc.price, style = lblStyle(nx.hi), color = color.new(color.black, 100), textcolor = c, size = f_size(lblSize), textalign = text.align_center)
+            live.push(nx)
+    0
+
+countTag(string tag, bool hi) =>
+    int n = 0
+    if live.size() > 0
+        for i = 0 to live.size() - 1
+            x = live.get(i)
+            if x.hi == hi and hasTag(x.tags, tag)
+                n += 1
+    n
+
+trim(string tag, bool hi, int keep) =>
+    int n = countTag(tag, hi)
+    while n > keep
+        int id = -1
+        int oldest = na
+        if live.size() > 0
+            for i = 0 to live.size() - 1
+                x = live.get(i)
+                if x.hi == hi and hasTag(x.tags, tag)
+                    if id == -1 or x.x < oldest
+                        id := i
+                        oldest := x.x
+        if id >= 0
+            removeTagAt(id, tag)
+            n -= 1
+        else
+            n := keep
+    0
+
+// ═════════════════════════════════════════════════════════════
+// Sources
+// ═════════════════════════════════════════════════════════════
+
+if barstate.isfirst
+    resolveSources()
+
+pivots(int len) =>
+    ph = ta.pivothigh(high, len, len)
+    pl = ta.pivotlow(low, len, len)
+    [ph, na(ph) ? int(na) : time[len], na(ph) ? int(na) : time_close[len], pl, na(pl) ? int(na) : time[len], na(pl) ? int(na) : time_close[len]]
+
+[ph1, pht1, phc1, pl1, plt1, plc1] = request.security(syminfo.tickerid, useTf.get(0), pivots(mtfLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[ph2, pht2, phc2, pl2, plt2, plc2] = request.security(syminfo.tickerid, useTf.get(1), pivots(mtfLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[ph3, pht3, phc3, pl3, plt3, plc3] = request.security(syminfo.tickerid, useTf.get(2), pivots(mtfLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[ph4, pht4, phc4, pl4, plt4, plc4] = request.security(syminfo.tickerid, useTf.get(3), pivots(mtfLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[ph5, pht5, phc5, pl5, plt5, plc5] = request.security(syminfo.tickerid, useTf.get(4), pivots(mtfLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+pdh   = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_on)
+pdl   = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_on)
+pdOpn = request.security(syminfo.tickerid, "D", time[1], lookahead = barmerge.lookahead_on)
+pdCls = request.security(syminfo.tickerid, "D", time_close[1], lookahead = barmerge.lookahead_on)
+
+cs = timeframe.in_seconds()
+if barstate.isconfirmed
+    if useSrc.get(0) and tfSec(useTf.get(0)) > cs
+        tr.get(0).trackWick(time(useTf.get(0)))
+    if useSrc.get(1) and tfSec(useTf.get(1)) > cs
+        tr.get(1).trackWick(time(useTf.get(1)))
+    if useSrc.get(2) and tfSec(useTf.get(2)) > cs
+        tr.get(2).trackWick(time(useTf.get(2)))
+    if useSrc.get(3) and tfSec(useTf.get(3)) > cs
+        tr.get(3).trackWick(time(useTf.get(3)))
+    if useSrc.get(4) and tfSec(useTf.get(4)) > cs
+        tr.get(4).trackWick(time(useTf.get(4)))
+    if pdOn and tfSec("D") > cs
+        tr.get(5).trackWick(time("D"))
+
+processPivot(int id, bool on, float ph, int pht, int phc, float pl, int plt, int plc, string tag, string tf) =>
+    if on and barstate.isconfirmed
+        newHi = not na(pht) and (na(pht[1]) or pht != pht[1])
+        newLo = not na(plt) and (na(plt[1]) or plt != plt[1])
+        if newHi
+            hx = anchor(id, ph, true, pht, phc, tf)
+            addLevel(ph, true, hx, tag)
+            trim(tag, true, levelsN)
+        if newLo
+            lx = anchor(id, pl, false, plt, plc, tf)
+            addLevel(pl, false, lx, tag)
+            trim(tag, false, levelsN)
+    0
+
+// ═════════════════════════════════════════════════════════════
+// Day roll and sessions
+// ═════════════════════════════════════════════════════════════
+
+TZ = "America/New_York"
+newDay = ta.change(time("D")) != 0
+
+if barstate.isconfirmed and newDay and not barstate.isfirst
+    if dailyReset
+        clearAll()
+    else
+        for i = 0 to sNames.size() - 1
+            clearTag(sNames.get(i))
+        clearTag("PDH")
+        clearTag("PDL")
+    if pdOn and not na(pdh)
+        hx = anchor(5, pdh, true, pdOpn, pdCls, "D")
+        lx = anchor(5, pdl, false, pdOpn, pdCls, "D")
+        addLevel(pdh, true, hx, "PDH")
+        addLevel(pdl, false, lx, "PDL")
+
+method runSession(Sess s, bool inside, bool st, bool ed, string tag) =>
+    if st
+        s.h := high
+        s.l := low
+        s.hx := time
+        s.lx := time
+    else if inside
+        if na(s.h) or high > s.h
+            s.h := high
+            s.hx := time
+        if na(s.l) or low < s.l
+            s.l := low
+            s.lx := time
+    if ed and not na(s.h)
+        addLevel(s.h, true, s.hx, tag)
+        addLevel(s.l, false, s.lx, tag)
+        trim(tag, true, levelsN)
+        trim(tag, false, levelsN)
+        s.h := na
+        s.l := na
+        s.hx := na
+        s.lx := na
+    0
+
+in1 = s1On and not na(time(timeframe.period, s1Time, TZ))
+in2 = s2On and not na(time(timeframe.period, s2Time, TZ))
+in3 = s3On and not na(time(timeframe.period, s3Time, TZ))
+
+if barstate.isconfirmed
+    ses.get(0).runSession(in1, in1 and not in1[1], not in1 and in1[1], sNames.get(0))
+    ses.get(1).runSession(in2, in2 and not in2[1], not in2 and in2[1], sNames.get(1))
+    ses.get(2).runSession(in3, in3 and not in3[1], not in3 and in3[1], sNames.get(2))
+
+processPivot(0, useSrc.get(0), ph1, pht1, phc1, pl1, plt1, plc1, tfText(useTf.get(0)), useTf.get(0))
+processPivot(1, useSrc.get(1), ph2, pht2, phc2, pl2, plt2, plc2, tfText(useTf.get(1)), useTf.get(1))
+processPivot(2, useSrc.get(2), ph3, pht3, phc3, pl3, plt3, plc3, tfText(useTf.get(2)), useTf.get(2))
+processPivot(3, useSrc.get(3), ph4, pht4, phc4, pl4, plt4, plc4, tfText(useTf.get(3)), useTf.get(3))
+processPivot(4, useSrc.get(4), ph5, pht5, phc5, pl5, plt5, plc5, tfText(useTf.get(4)), useTf.get(4))
+
+// ═════════════════════════════════════════════════════════════
+// Sweep
+// ═════════════════════════════════════════════════════════════
+
+poolHi := false
+poolLo := false
+poolHiTag := ""
+poolLoTag := ""
+sweptHiMax := na
+sweptLoMin := na
+
+if barstate.isconfirmed
+    int i = 0
+    while i < live.size()
+        x = live.get(i)
+        x.advance(xRight, visLim)
+        bool hit = time > x.x and (x.hi ? high >= x.p : low <= x.p)
+        if hit
+            markSwept(x, time)
+            r = live.remove(i)
+            done.push(x)
+            hideOldSweeps()
+            if x.hi
+                poolHi := true
+                if drawPrevSide == 1 and not na(drawPrev) and math.abs(x.p - drawPrev) <= syminfo.mintick * 0.5
+                    drawSwept := true
+                sweptHiMax := na(sweptHiMax) ? x.p : math.max(sweptHiMax, x.p)
+                if str.length(poolHiTag) == 0
+                    poolHiTag := tagText(x.tags)
+            else
+                poolLo := true
+                if drawPrevSide == -1 and not na(drawPrev) and math.abs(x.p - drawPrev) <= syminfo.mintick * 0.5
+                    drawSwept := true
+                sweptLoMin := na(sweptLoMin) ? x.p : math.min(sweptLoMin, x.p)
+                if str.length(poolLoTag) == 0
+                    poolLoTag := tagText(x.tags)
+            pruneDone()
+        else
+            i += 1
+else if barstate.islast
+    if live.size() > 0
+        for k = 0 to live.size() - 1
+            live.get(k).advance(xRight, visLim)
+
+// ═════════════════════════════════════════════════════════════
+// Ranging
+//
+// Candles building sideways and tight, printing relative equal highs and
+// relative equal lows. Read from the chart timeframe's own swings, never
+// from the register, so a consolidation shorter than one register candle
+// is still seen.
+//
+// A box needs rgMin swing highs within the equal tolerance of its top and
+// rgMin swing lows within the tolerance of its bottom, and its height,
+// wick to wick, must fit the width cap. Two highs are two touches only
+// when a swing low between them sits at least RG_PULL of the box below
+// the top, and the mirror for lows. Of every run of swings that
+// qualifies, the oldest start is taken.
+//
+// Early: a run whose first candle comes within RG_DISP_W candles after a
+// displacement candle may qualify one touch short of the full count.
+//
+// Tight: when the bodies of the last rgBodyN candles sit inside a band of
+// rgBodyW x ATR, a run spanning those candles may qualify one touch short
+// on each side. Bodies only decide when - the box edges stay on the wicks.
+//
+// Neither early route may take a run that contains a displacement candle.
+//
+// While it is live, sweeps of pools strictly inside it reach no range
+// engine. The register still marks them swept. The gate reads the box as
+// it stood before this bar, so the bar that takes an edge passes through.
+//
+// A wick past an edge by no more than the tolerance is another equal high
+// or low: the box stretches to it. A close beyond an edge, a wick past it
+// by more than the tolerance, or a stretch that would breach the cap ends
+// the box on that side. The box is drawn to the last candle inside it.
+// ═════════════════════════════════════════════════════════════
+
+var array<Swg> rgSw = array.new<Swg>()
+var array<box> rgBoxes = array.new<box>()
+var bool  rgActive = false
+var float rgHi = na
+var float rgLo = na
+var int   rgL = na
+var float rgCap = na      // width cap and equal tolerance, fixed when the box goes live
+var float rgTol = na
+var int   rgBreakT = 0
+var box   rgBox = na
+bool rgBrokeHi = false
+bool rgBrokeLo = false
+bool rgFormed  = false
+
+passHi = poolHi and (not rgActive or sweptHiMax >= rgHi - tol)
+passLo = poolLo and (not rgActive or sweptLoMin <= rgLo + tol)
+
+// chart-timeframe swings. Equal neighbours yield one swing, the later bar:
+// strictly beyond the bars to its right, at or beyond the bars to its left.
+rgRH  = ta.highest(high, rgLen)
+rgRL  = ta.lowest(low, rgLen)
+rgCh  = high[rgLen]
+rgCl  = low[rgLen]
+rgSwT = time[rgLen]
+rgLH  = rgRH[rgLen + 1]
+rgLL  = rgRL[rgLen + 1]
+rgNewH = not na(rgLH) and rgCh > rgRH and rgCh >= rgLH
+rgNewL = not na(rgLL) and rgCl < rgRL and rgCl <= rgLL
+
+// a displacement candle: body against the ATR of the candle before it
+rgAtrP = atrVal[1]
+rgDisp = not na(rgAtrP) and math.abs(close - open) >= rgDispX * rgAtrP
+
+// tight bodies: the bodies of the last rgBodyN candles inside one narrow band
+rgBodyBand = ta.highest(math.max(open, close), rgBodyN) - ta.lowest(math.min(open, close), rgBodyN)
+rgTight    = rgBody and not na(rgBodyBand) and not na(atrVal) and rgBodyBand <= rgBodyW * atrVal
+
+rgBorder = switch rgSty
+    "Dashed" => line.style_dashed
+    "Dotted" => line.style_dotted
+    => line.style_solid
+
+if barstate.isconfirmed and rgOn
+    if rgActive
+        rgBrokeHi := close > rgHi or high > rgHi + rgTol
+        rgBrokeLo := close < rgLo or low < rgLo - rgTol
+        if not (rgBrokeHi or rgBrokeLo)
+            float nHi = math.max(rgHi, high)
+            float nLo = math.min(rgLo, low)
+            if nHi - nLo > rgCap
+                rgBrokeHi := high > rgHi
+                rgBrokeLo := low < rgLo
+            else
+                rgHi := nHi
+                rgLo := nLo
+        if rgBrokeHi or rgBrokeLo
+            rgActive := false
+            rgBreakT := time
+        else if not na(rgBox)
+            box.set_right(rgBox, time)
+            box.set_top(rgBox, rgHi)
+            box.set_bottom(rgBox, rgLo)
+
+    if rgNewH
+        rgSw.unshift(Swg.new(rgCh, true, rgSwT))
+    if rgNewL
+        rgSw.unshift(Swg.new(rgCl, false, rgSwT))
+    while rgSw.size() > 40
+        rgSw.pop()
+
+    // a new box is looked for when a swing arrives or the bodies are
+    // tight, and only from swings formed after the last break, so a stop
+    // hunt cannot be absorbed into a widened box
+    if not rgActive and (rgNewH or rgNewL or rgTight)
+        float cap  = rgAtrX * nz(atrVal, 0)
+        float tolv = rgEqX * nz(atrVal, 0)
+        float bMax = na
+        float bMin = na
+        float fHi  = na
+        float fLo  = na
+        int   fT   = na
+        int   fKind = 0      // 0 full count, 1 early after displacement, 2 tight bodies
+        bool  hasD = false   // the run so far contains a displacement candle
+        int   j    = 0
+        lim = math.min(bar_index, MAX_SCAN - 1)
+        if rgSw.size() > 0 and cap > 0
+            // newest swing first. The envelope is every wick from the
+            // swing's own bar to this one, so price cannot have left it.
+            for k = 0 to rgSw.size() - 1
+                s = rgSw.get(k)
+                if s.t <= rgBreakT or s.t < time[lim]
+                    break
+                while j <= lim and time[j] >= s.t
+                    bMax := na(bMax) ? high[j] : math.max(bMax, high[j])
+                    bMin := na(bMin) ? low[j] : math.min(bMin, low[j])
+                    if rgDisp[j]
+                        hasD := true
+                    j += 1
+                if bMax - bMin > cap
+                    break
+                // touches, oldest swing first. loS is the lowest swing low
+                // since the last counted high, hiS the mirror.
+                float sep = RG_PULL * (bMax - bMin)
+                int   nh  = 0
+                int   nl  = 0
+                float loS = na
+                float hiS = na
+                for m = k to 0
+                    q = rgSw.get(m)
+                    if q.hi
+                        hiS := na(hiS) ? q.p : math.max(hiS, q.p)
+                        if q.p >= bMax - tolv and (nh == 0 or (not na(loS) and bMax - loS >= sep))
+                            nh += 1
+                            loS := na
+                    else
+                        loS := na(loS) ? q.p : math.min(loS, q.p)
+                        if q.p <= bMin + tolv and (nl == 0 or (not na(hiS) and hiS - bMin >= sep))
+                            nl += 1
+                            hiS := na
+                // j is now the number of candles in this run, and points at
+                // the candle just before its first one
+                bool full  = nh >= rgMin and nl >= rgMin
+                bool early = false
+                if rgEarly and not full and not hasD and nh + nl >= 2 * rgMin - 1 and math.min(nh, nl) >= rgMin - 1
+                    for w = 0 to RG_DISP_W - 1
+                        if j + w <= lim
+                            if rgDisp[j + w]
+                                early := true
+                                break
+                bool tight = rgTight and not full and not early and not hasD and math.min(nh, nl) >= rgMin - 1 and j >= rgBodyN
+                if full or early or tight
+                    fT  := s.t
+                    fHi := bMax
+                    fLo := bMin
+                    fKind := full ? 0 : early ? 1 : 2
+
+        if not na(fT)
+            rgActive := true
+            rgFormed := true
+            rgHi  := fHi
+            rgLo  := fLo
+            rgL   := fT
+            rgCap := cap
+            rgTol := tolv
+            rgBox := na
+            if rgShow
+                rgBox := box.new(rgL, rgHi, time, rgLo, xloc = xloc.bar_time, border_color = rgCol, border_width = 1, border_style = rgBorder, bgcolor = color.new(rgCol, 100), text = fKind == 1 ? "Ranging (early)" : fKind == 2 ? "Ranging (tight)" : "Ranging", text_color = rgCol, text_size = f_size(lblSize), text_halign = text.align_left, text_valign = text.align_top)
+                rgBoxes.push(rgBox)
+                while rgBoxes.size() > rgKeep
+                    box.delete(rgBoxes.shift())
+
+// ═════════════════════════════════════════════════════════════
+// Dealing range
+//
+// No range until liquidity frames one. A registered purge opens the
+// matching side; the opposing purge completes the pair. The tracking
+// side following its excursion is development, not a reframe.
+//
+// Rotation - any opposing purge re-anchors that side at the purging bar.
+// Frame    - identical until both sides are set. After that only a purge
+//            of a pool at or beyond a boundary moves it, and the moved
+//            side can only widen.
+// ═════════════════════════════════════════════════════════════
+
+method update(Rng r, bool tookHi, bool tookLo, bool widen) =>
+    r.reframed := false
+    r.extended := false
+    r.contracted := false
+    if tookHi and tookLo
+        // Both sides taken on one bar. OHLC cannot establish the order, so
+        // only what holds in EITHER order is applied: a side that was not
+        // being tracked re-anchors to this bar, and the side that was being
+        // tracked can only extend - re-anchoring it would assume its sweep
+        // came last. Direction is unknown, so tracking and the draw are
+        // suspended until the next single-sided purge.
+        r.amb := true
+        int prev = r.st
+        if prev != 1
+            if not (widen and r.hiSet and r.hi > high)
+                r.hi  := high
+                r.hiT := time
+                r.hiB := bar_index
+            r.reframed := r.hiSet
+            r.hiSet := true
+        else if high > r.hi
+            r.hi  := high
+            r.hiT := time
+            r.hiB := bar_index
+            r.extended := true
+        if prev != -1
+            if not (widen and r.loSet and r.lo < low)
+                r.lo  := low
+                r.loT := time
+                r.loB := bar_index
+            r.reframed := r.reframed or r.loSet
+            r.loSet := true
+        else if low < r.lo
+            r.lo  := low
+            r.loT := time
+            r.loB := bar_index
+            r.extended := true
+        r.st := 0
+    else if tookHi
+        r.amb := false
+        if r.st != 1
+            r.reframed := true
+            r.st := 1
+            if not (widen and r.hiSet and r.hi > high)
+                r.hi  := high
+                r.hiT := time
+                r.hiB := bar_index
+            r.hiSet := true
+    else if tookLo
+        r.amb := false
+        if r.st != -1
+            r.reframed := true
+            r.st := -1
+            if not (widen and r.loSet and r.lo < low)
+                r.lo  := low
+                r.loT := time
+                r.loB := bar_index
+            r.loSet := true
+    if r.st == 1 and r.hiSet and high > r.hi
+        r.hi  := high
+        r.hiT := time
+        r.hiB := bar_index
+        r.extended := true
+    if r.st == -1 and r.loSet and low < r.lo
+        r.lo  := low
+        r.loT := time
+        r.loB := bar_index
+        r.extended := true
+    0
+
+method isLive(Rng r) => r.hiSet and r.loSet and not na(r.hi) and not na(r.lo) and r.hi > r.lo
+
+// Delivery. A raid arms it in the opposite direction and records the last
+// confirmed chart-TF swing on the other side. A confirmed close through that
+// swing forms it. A newer raid on either side re-arms; a double raid on one
+// bar disarms, since the order cannot be known.
+method step(Dlv d, bool rHi, bool rLo, float swLo, float swHi) =>
+    d.formed := false
+    d.extended := false
+    // an active delivery ends when its raid extreme is taken back
+    if d.dir == -1
+        if high >= d.hi
+            d.dir := 0
+        else if low < d.lo
+            d.lo  := low
+            d.loT := time
+            d.loB := bar_index
+            d.extended := true
+    else if d.dir == 1
+        if low <= d.lo
+            d.dir := 0
+        else if high > d.hi
+            d.hi  := high
+            d.hiT := time
+            d.hiB := bar_index
+            d.extended := true
+
+    if rHi and rLo
+        d.pend := 0
+    else if rHi
+        d.pend  := -1
+        d.pExt  := high
+        d.pExtT := time
+        d.pExtB := bar_index
+        d.pOpp  := low
+        d.pOppT := time
+        d.pOppB := bar_index
+        d.pMss  := swLo
+    else if rLo
+        d.pend  := 1
+        d.pExt  := low
+        d.pExtT := time
+        d.pExtB := bar_index
+        d.pOpp  := high
+        d.pOppT := time
+        d.pOppB := bar_index
+        d.pMss  := swHi
+    else if d.pend == -1
+        if high > d.pExt
+            d.pExt  := high
+            d.pExtT := time
+            d.pExtB := bar_index
+        if low < d.pOpp
+            d.pOpp  := low
+            d.pOppT := time
+            d.pOppB := bar_index
+    else if d.pend == 1
+        if low < d.pExt
+            d.pExt  := low
+            d.pExtT := time
+            d.pExtB := bar_index
+        if high > d.pOpp
+            d.pOpp  := high
+            d.pOppT := time
+            d.pOppB := bar_index
+
+    if d.pend == -1 and not na(d.pMss) and close < d.pMss
+        d.dir := -1
+        d.hi  := d.pExt
+        d.hiT := d.pExtT
+        d.hiB := d.pExtB
+        d.lo  := d.pOpp
+        d.loT := d.pOppT
+        d.loB := d.pOppB
+        d.pend := 0
+        d.formed := true
+    else if d.pend == 1 and not na(d.pMss) and close > d.pMss
+        d.dir := 1
+        d.lo  := d.pExt
+        d.loT := d.pExtT
+        d.loB := d.pExtB
+        d.hi  := d.pOpp
+        d.hiT := d.pOppT
+        d.hiB := d.pOppB
+        d.pend := 0
+        d.formed := true
+    0
+
+// ── IPDA window ──────────────────────────────────────────────
+// One record per Daily bar of the symbol, newest first: its high and
+// low and the chart bar that printed each. The window is the current
+// Daily bar plus the previous lookback-1, so its extremes agree with the
+// same count on a Daily chart. Recalculated every day.
+
+var array<int>   ipDayT = array.new<int>()
+var array<float> ipHiP  = array.new<float>()
+var array<int>   ipHiT  = array.new<int>()
+var array<int>   ipHiB  = array.new<int>()
+var array<float> ipLoP  = array.new<float>()
+var array<int>   ipLoT  = array.new<int>()
+var array<int>   ipLoB  = array.new<int>()
+var bool         ipPartial = false   // the oldest record began mid-day on the first loaded bar
+
+if barstate.isconfirmed and frameOn
+    if newDay or ipDayT.size() == 0
+        if ipDayT.size() == 0 and not newDay
+            ipPartial := true
+        ipDayT.unshift(time)
+        ipHiP.unshift(high)
+        ipHiT.unshift(time)
+        ipHiB.unshift(bar_index)
+        ipLoP.unshift(low)
+        ipLoT.unshift(time)
+        ipLoB.unshift(bar_index)
+        while ipDayT.size() > 60
+            ipPartial := false   // the oldest record, the partial one, is the one leaving
+            ipDayT.pop()
+            ipHiP.pop()
+            ipHiT.pop()
+            ipHiB.pop()
+            ipLoP.pop()
+            ipLoT.pop()
+            ipLoB.pop()
+    else
+        if high > ipHiP.get(0)
+            ipHiP.set(0, high)
+            ipHiT.set(0, time)
+            ipHiB.set(0, bar_index)
+        if low < ipLoP.get(0)
+            ipLoP.set(0, low)
+            ipLoT.set(0, time)
+            ipLoB.set(0, bar_index)
+
+// full Daily records available; the current Daily bar counts, as it does
+// in the same count on a Daily chart
+ipDays    = ipDayT.size() - (ipPartial ? 1 : 0)
+ipdaReady = ipDays >= ipdaLb
+
+// the extreme on one side across the newest n Daily records
+f_ipExt(bool hi, int n) =>
+    float p = na
+    int   t = na
+    int   b = na
+    for i = 0 to n - 1
+        v = hi ? ipHiP.get(i) : ipLoP.get(i)
+        if na(p) or (hi ? v > p : v < p)
+            p := v
+            t := hi ? ipHiT.get(i) : ipLoT.get(i)
+            b := hi ? ipHiB.get(i) : ipLoB.get(i)
+    [p, t, b]
+
+var Rng rot = Rng.new()
+var Rng frm = Rng.new()
+var Dlv dlv = Dlv.new()
+var int    lastSweep = 0 // 1 buy-side, -1 sell-side, 2 both on one bar
+var string lastSweepTag = ""
+
+if barstate.isconfirmed
+    if passHi and passLo
+        lastSweep := 2
+        lastSweepTag := ""
+    else if passHi
+        lastSweep := 1
+        lastSweepTag := poolHiTag
+    else if passLo
+        lastSweep := -1
+        lastSweepTag := poolLoTag
+
+    if rotOn
+        rEdgeHi = edgeTrigger and rot.hiSet and rot.st != 1 and high >= rot.hi
+        rEdgeLo = edgeTrigger and rot.loSet and rot.st != -1 and low <= rot.lo
+        rot.update(passHi or rEdgeHi, passLo or rEdgeLo, false)
+
+    if frameOn
+        // once framed, a purge counts only when the swept pool sits at or
+        // beyond the boundary - external range liquidity
+        framed  = frm.hiSet and frm.loSet
+        fExtHi  = passHi and (not framed or sweptHiMax >= frm.hi - tol)
+        fExtLo  = passLo and (not framed or sweptLoMin <= frm.lo + tol)
+        fEdgeHi = edgeTrigger and frm.hiSet and frm.st != 1 and high >= frm.hi
+        fEdgeLo = edgeTrigger and frm.loSet and frm.st != -1 and low <= frm.lo
+        frm.update(fExtHi or fEdgeHi, fExtLo or fEdgeLo, true)
+        // IPDA contraction: no boundary may be older than the lookback.
+        // An aged boundary moves to that side's extreme inside the window.
+        // Only once a full window exists; until then the frame stays a pure
+        // liquidity frame and is marked not ready.
+        if ipdaReady
+            n = ipdaLb
+            wStart = ipDayT.get(n - 1)
+            if frm.hiSet and frm.hiT < wStart
+                [hP, hT, hB] = f_ipExt(true, n)
+                frm.hi  := hP
+                frm.hiT := hT
+                frm.hiB := hB
+                frm.contracted := true
+            if frm.loSet and frm.loT < wStart
+                [lP, lT, lB] = f_ipExt(false, n)
+                frm.lo  := lP
+                frm.loT := lT
+                frm.loB := lB
+                frm.contracted := true
+
+    if dlvOn
+        dlv.step(passHi, passLo, oSwLo, oSwHi)
+
+// ── primary range ────────────────────────────────────────────
+// the box, EQ, position, draw, boundary odds, volume profile, table
+// and alerts all measure against this one
+
+rotLive = rotOn and rot.isLive()
+frmLive = frameOn and frm.isLive()
+dlvLive = dlvOn and dlv.dir != 0 and not na(dlv.hi) and not na(dlv.lo) and dlv.hi > dlv.lo
+
+// the chosen range if it is live, else the first live range, else the
+// chosen one if switched on (so the table can show it developing)
+reqLive = primSel == "Rotation" ? rotLive : primSel == "IPDA Frame" ? frmLive : dlvLive
+reqOn   = primSel == "Rotation" ? rotOn : primSel == "IPDA Frame" ? frameOn : dlvOn
+prim    = reqLive ? primSel : rotLive ? "Rotation" : frmLive ? "IPDA Frame" : dlvLive ? "Delivery" : reqOn ? primSel : rotOn ? "Rotation" : frameOn ? "IPDA Frame" : dlvOn ? "Delivery" : "None"
+frmName  = "IPDA Frame " + str.tostring(ipdaLb) + "D" + (ipdaReady ? "" : " (not ready, " + str.tostring(ipDays) + "D loaded)")
+primName = (prim == "IPDA Frame" ? frmName : prim) + (prim != primSel and prim != "None" ? " (fallback)" : "")
+isRot = prim == "Rotation"
+isFrm = prim == "IPDA Frame"
+isDlv = prim == "Delivery"
+
+cHi  = isRot ? rot.hi  : isFrm ? frm.hi  : isDlv ? dlv.hi  : float(na)
+cLo  = isRot ? rot.lo  : isFrm ? frm.lo  : isDlv ? dlv.lo  : float(na)
+cHiT = isRot ? rot.hiT : isFrm ? frm.hiT : isDlv ? dlv.hiT : int(na)
+cLoT = isRot ? rot.loT : isFrm ? frm.loT : isDlv ? dlv.loT : int(na)
+cHiB = isRot ? rot.hiB : isFrm ? frm.hiB : isDlv ? dlv.hiB : int(na)
+cLoB = isRot ? rot.loB : isFrm ? frm.loB : isDlv ? dlv.loB : int(na)
+
+// a bearish delivery follows a buy-side raid, so it reads as tracking the high
+primSt  = isRot ? rot.st : isFrm ? frm.st : isDlv ? -dlv.dir : 0
+primAmb = isRot ? rot.amb : isFrm ? frm.amb : false
+primDev = isRot ? (rot.hiSet or rot.loSet) : isFrm ? (frm.hiSet or frm.loSet) : isDlv ? (dlv.pend != 0) : false
+
+rangeLive = (isRot ? rotLive : isFrm ? frmLive : isDlv ? dlvLive : false) and not na(cHi) and not na(cLo) and cHi > cLo
+
+var bool wasLive = false
+firstLive = rangeLive and not wasLive
+wasLive := rangeLive
+
+rangeReframed    = barstate.isconfirmed and rangeLive and not firstLive and (isRot ? rot.reframed : isFrm ? frm.reframed : isDlv ? dlv.formed : false)
+boundaryExtended = barstate.isconfirmed and rangeLive and (isRot ? rot.extended : isFrm ? frm.extended : isDlv ? dlv.extended : false)
+dlvFormed        = barstate.isconfirmed and dlvLive and dlv.formed
+frmContracted    = barstate.isconfirmed and frmLive and frm.contracted
+
+wkEq = rangeLive ? (cHi + cLo) / 2 : float(na)
+
+// ═════════════════════════════════════════════════════════════
+// Draw
+// ═════════════════════════════════════════════════════════════
+
+drawSide = primAmb ? 0 : primSt == 1 ? -1 : primSt == -1 ? 1 : 0
+
+float drawLvl = na
+string drawTag = ""
+
+if rangeLive and drawSide != 0 and live.size() > 0
+    for k = 0 to live.size() - 1
+        x = live.get(k)
+        if (x.hi and drawSide == 1 and x.p > close) or (not x.hi and drawSide == -1 and x.p < close)
+            if na(drawLvl) or math.abs(x.p - close) < math.abs(drawLvl - close)
+                drawLvl := x.p
+                drawTag := tagText(x.tags)
+
+drawPrev     := drawLvl
+drawPrevSide := na(drawLvl) ? 0 : drawSide
+
+// ═════════════════════════════════════════════════════════════
+// Dealing range drawing
+// ═════════════════════════════════════════════════════════════
+
+var line  lnHi = na
+var line  lnLo = na
+var line  lnEq = na
+var label lbHi = na
+var label lbLo = na
+var label lbEq = na
+var label lbDr = na
+// redrawn on the last bar: the other ranges, the box, its midline and scale
+var array<line>  exLines  = array.new<line>()
+var array<label> exLabels = array.new<label>()
+var array<box>   exBoxes  = array.new<box>()
+
+f_other(float h, float l, int hT, int lT, string name, color cH, color cL, int w, string sty, bool mid) =>
+    exLines.push(line.new(hT, h, xRight, h, xloc = xloc.bar_time, color = cH, width = w, style = sty))
+    exLines.push(line.new(lT, l, xRight, l, xloc = xloc.bar_time, color = cL, width = w, style = sty))
+    exLabels.push(label.new(xRight, h, f_label(name + " HIGH", h), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(cH, 100), textcolor = cH, size = f_size(lblSize)))
+    exLabels.push(label.new(xRight, l, f_label(name + " LOW", l), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(cL, 100), textcolor = cL, size = f_size(lblSize)))
+    if mid
+        m = (h + l) / 2
+        exLines.push(line.new(math.max(hT, lT), m, xRight, m, xloc = xloc.bar_time, color = cH, width = 1, style = line.style_dotted))
+    0
+
+if barstate.islast
+    line.delete(lnHi)
+    line.delete(lnLo)
+    line.delete(lnEq)
+    label.delete(lbHi)
+    label.delete(lbLo)
+    label.delete(lbEq)
+    label.delete(lbDr)
+    lnHi := na
+    lnLo := na
+    lnEq := na
+    lbHi := na
+    lbLo := na
+    lbEq := na
+    lbDr := na
+    for ln in exLines
+        line.delete(ln)
+    exLines.clear()
+    for lb in exLabels
+        label.delete(lb)
+    exLabels.clear()
+    for bx in exBoxes
+        box.delete(bx)
+    exBoxes.clear()
+
+    if rangeLive
+        if showHi
+            lnHi := line.new(cHiT, cHi, xRight, cHi, xloc = xloc.bar_time, color = colHi, width = widHi, style = line.style_solid)
+            lbHi := label.new(xRight, cHi, f_label2(txtHi, cHi), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(colHi, 100), textcolor = colHi, size = f_size(lblSize))
+        if showLo
+            lnLo := line.new(cLoT, cLo, xRight, cLo, xloc = xloc.bar_time, color = colLo, width = widLo, style = line.style_solid)
+            lbLo := label.new(xRight, cLo, f_label2(txtLo, cLo), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(colLo, 100), textcolor = colLo, size = f_size(lblSize))
+        if showEq
+            // with the box on, its gold midline is the EQ stroke; the label stays
+            cEq = boxOn ? colMid : colEq
+            if not boxOn
+                eqStart = math.max(cHiT, cLoT)
+                lnEq := line.new(eqStart, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colEq, width = widEq, style = line.style_dashed)
+            lbEq := label.new(xRight, wkEq, f_label2(txtEq, wkEq), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(cEq, 100), textcolor = cEq, size = f_size(lblSize))
+        // premium / discount box over the primary range, split at 0.5 only
+        if boxOn
+            bxL   = math.min(cHiT, cLoT)
+            cPm   = color.new(colPrem, 0)
+            cDs   = color.new(colDisc, 0)
+            cNone = color.new(color.black, 100)
+            exBoxes.push(box.new(bxL, cHi, xRight, wkEq, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colPrem, text = "PREMIUM", text_color = cPm, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_top))
+            exBoxes.push(box.new(bxL, wkEq, xRight, cLo, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colDisc, text = "DISCOUNT", text_color = cDs, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_bottom))
+            exLines.push(line.new(bxL, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colMid, width = 1, style = line.style_solid))
+            exLabels.push(label.new(bxL, cHi,  "1",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cPm,    size = f_size(lblSize)))
+            exLabels.push(label.new(bxL, wkEq, "0.5", xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = colMid, size = f_size(lblSize)))
+            exLabels.push(label.new(bxL, cLo,  "0",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cDs,    size = f_size(lblSize)))
+        // no fallback: a range boundary is not automatically an unswept objective
+        if showDraw and drawSide != 0 and not na(drawLvl)
+            dOdds = oddsLbl(drawLvl)
+            dTxt = "DRAW → " + (drawSide == 1 ? "BSL" : "SSL") + (drawTag == "" ? "" : " " + drawTag) + (str.length(dOdds) > 0 ? "  " + dOdds : "")
+            lbDr := label.new(xRight, drawLvl, dTxt, xloc = xloc.bar_time, style = drawSide == 1 ? label.style_label_lower_left : label.style_label_upper_left, color = color.new(color.black, 100), textcolor = colDraw, size = f_size(lblSize))
+
+    // the other ranges that are on, drawn quieter than the primary.
+    // a range identical to the primary is drawn once.
+    if rotLive and not isRot and not (rot.hi == cHi and rot.lo == cLo)
+        f_other(rot.hi, rot.lo, rot.hiT, rot.loT, "ROTATION", colHi, colLo, 1, line.style_dotted, false)
+    if frmLive and not isFrm and not (frm.hi == cHi and frm.lo == cLo)
+        f_other(frm.hi, frm.lo, frm.hiT, frm.loT, str.upper(frmName), colHi, colLo, 1, line.style_dotted, false)
+    if dlvLive and not isDlv
+        f_other(dlv.hi, dlv.lo, dlv.hiT, dlv.loT, "DELIVERY", colRef, colRef, widRef, line.style_dashed, true)
+
+// ═════════════════════════════════════════════════════════════
+// Volume context - profile and POC anchored to the dealing range
+// ═════════════════════════════════════════════════════════════
+//
+// Rows are sized by ATR, not by a fixed tick count, so the profile
+// scales with volatility. Each bar's volume is spread across every
+// row its high-low range touches, weighted by overlap against the
+// bar's FULL range - so volume traded outside the range boundaries
+// is not credited to the rows inside them. The rows therefore sum
+// to less than total volume by design: this describes trade within
+// the range, which is the only thing the range can speak to.
+
+var float    vcPoc   = na
+var bool     vcValid = false
+var polyline vcPoly  = na
+var line     vcLine  = na
+var label    vcLbl   = na
+
+vcAtr = ta.atr(vcAtrLen)
+
+if barstate.islast
+    polyline.delete(vcPoly)
+    line.delete(vcLine)
+    label.delete(vcLbl)
+    vcPoly  := na
+    vcLine  := na
+    vcLbl   := na
+    vcPoc   := na
+    vcValid := false
+
+    if vcOn and rangeLive and not na(vcAtr) and vcAtr > 0 and not na(cHiB) and not na(cLoB)
+        float vTop = cHi
+        float vBot = cLo
+        float vH   = vTop - vBot
+
+        if vH > 0
+            // row sizing: ATR relative, capped, then re-tiled so the
+            // rows span the range exactly
+            int vRows = math.max(1, int(math.round(vH / (vcAtr * vcBinMult))))
+            if vRows > vcMaxRows
+                vRows := vcMaxRows
+            float vBin = vH / vRows
+
+            // anchor at the older of the two boundary bars
+            int vAnchor = math.min(cHiB, cLoB)
+            int vStart  = math.min(math.max(vAnchor, bar_index - vcMaxLook), bar_index)
+
+            bins = array.new<float>(vRows, 0.0)
+
+            for i = vStart to bar_index
+                int   off = bar_index - i
+                float bh  = high[off]
+                float bl  = low[off]
+                float bv  = volume[off]
+
+                if not na(bh) and not na(bl) and not na(bv) and bv > 0
+                    float ch = math.min(bh, vTop)
+                    float cl = math.max(bl, vBot)
+
+                    if ch >= cl
+                        float span = bh - bl
+
+                        if span <= 0
+                            int ix = math.max(0, math.min(vRows - 1, int(math.floor((cl - vBot) / vBin))))
+                            array.set(bins, ix, array.get(bins, ix) + bv)
+                        else
+                            int iLo = math.max(0, math.min(vRows - 1, int(math.floor((cl - vBot) / vBin))))
+                            int iHi = math.max(0, math.min(vRows - 1, int(math.floor((ch - vBot) / vBin))))
+                            for j = iLo to iHi
+                                float rLo = vBot + j * vBin
+                                float rHi = rLo + vBin
+                                float ov  = math.min(rHi, ch) - math.max(rLo, cl)
+                                if ov > 0
+                                    array.set(bins, j, array.get(bins, j) + bv * (ov / span))
+
+            float vMax = array.max(bins)
+
+            if not na(vMax) and vMax > 0
+                int pocIdx = array.indexof(bins, vMax)
+                vcPoc   := vBot + pocIdx * vBin + vBin / 2
+                vcValid := true
+
+                if vcPocShow
+                    int vX1 = math.min(cHiT, cLoT)
+                    vcLine := line.new(vX1, vcPoc, xRight, vcPoc, xloc = xloc.bar_time, color = vcPocCol, width = vcPocWid, style = line.style_solid)
+                    vcLbl  := label.new(xRight, vcPoc, f_label2("POC", vcPoc), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcPocCol, 100), textcolor = vcPocCol, size = f_size(lblSize))
+
+                if vcProfShow
+                    // Permanent placement model:
+                    //   primary range / P-D box ends at bar_index + extendBars
+                    //   widest profile row begins after vcProfGap
+                    //   histogram width is controlled independently by vcProfWidth
+                    // Keeping gap and width separate prevents a wider profile from
+                    // creeping back over candles or into the premium/discount box.
+                    int profLeft  = bar_index + extendBars + vcProfGap
+                    int profRight = profLeft + vcProfWidth
+                    pts = array.new<chart.point>()
+                    for k = 0 to vRows - 1
+                        float pLo = vBot + k * vBin
+                        float pHi = pLo + vBin
+                        int   pW  = int(math.round((array.get(bins, k) / vMax) * vcProfWidth))
+
+                        if k == 0
+                            array.push(pts, chart.point.from_index(profRight, pLo))
+
+                        array.push(pts, chart.point.from_index(profRight - pW, pLo))
+                        array.push(pts, chart.point.from_index(profRight - pW, pHi))
+
+                        if k == vRows - 1
+                            array.push(pts, chart.point.from_index(profRight, pHi))
+
+                    vcPoly := polyline.new(points = pts, closed = false, line_color = vcProfCol, fill_color = color.new(vcProfCol, vcProfFill), line_width = 1)
+
+// ═════════════════════════════════════════════════════════════
+// Table
+// ═════════════════════════════════════════════════════════════
+
+posTxt    = rangeLive ? (close > wkEq ? "Premium" : close < wkEq ? "Discount" : "Equilibrium") : "—"
+sweepSide = lastSweep == 1 ? "Buy-side" : lastSweep == -1 ? "Sell-side" : lastSweep == 2 ? "Both" : "—"
+sweepTxt  = sweepSide + (str.length(lastSweepTag) > 0 ? "  " + lastSweepTag : "")
+targetTxt = na(drawLvl) ? "—" : fmt_tick(drawLvl) + (drawTag == "" ? "" : "  " + drawTag)
+
+f_od(float p) =>
+    od = oddsLbl(p)
+    str.length(od) > 0 ? "   " + od : ""
+
+riskTxt = not oddsOn ? "—" : oddsRisk == "Distance to last swing" ? fmt_tick(riskUp) + " ↑ / " + fmt_tick(riskDn) + " ↓" : fmt_tick(riskFlat)
+stState  = rangeLive ? "Framed" : rgActive ? "Ranging" : primDev ? "Developing" : "None"
+stateTxt = (prim == "None" ? "" : primName + " · ") + stState + (rangeLive and rgActive ? ", ranging" : "")
+
+f_row(table tt, int r, string k, string v) =>
+    table.cell(tt, 0, r, k, text_color = tblTxt, text_size = f_tsize(tblSize), text_halign = text.align_left)
+    table.cell(tt, 1, r, v, text_color = tblTxt, text_size = f_tsize(tblSize), text_halign = text.align_right)
+
+var table t = na
+if tblOn and barstate.islast
+    table.delete(t)
+    t := table.new(f_pos(tblPos), 2, vcOn ? 10 : 9, bgcolor = tblBg, border_color = tblBorder, border_width = 1, frame_color = tblBorder, frame_width = 1)
+    f_row(t, 0, "Range",      stateTxt)
+    f_row(t, 1, "Range high", rangeLive ? fmt_tick(cHi) + f_od(cHi) : "—")
+    f_row(t, 2, "Range low",  rangeLive ? fmt_tick(cLo) + f_od(cLo) : "—")
+    f_row(t, 3, "Delivery",   dlvLive ? fmt_tick(dlv.hi) + " / " + fmt_tick(dlv.lo) : "—")
+    f_row(t, 4, "EQ",         fmt_tick(wkEq) + (rangeLive ? f_od(wkEq) : ""))
+    f_row(t, 5, "Position",   posTxt)
+    f_row(t, 6, "Last sweep", sweepTxt)
+    f_row(t, 7, "Draw",       targetTxt + (na(drawLvl) ? "" : f_od(drawLvl)))
+    f_row(t, 8, "Risk (1R)",  riskTxt)
+    if vcOn
+        f_row(t, 9, "POC", vcValid ? fmt_tick(vcPoc) + f_od(vcPoc) : "—")
+
+// ═════════════════════════════════════════════════════════════
+// Alerts
+// ═════════════════════════════════════════════════════════════
+
+// Set in the sweep loop: the exact registered pool that was the draw coming
+// into this bar was removed because this bar swept it. A pool cleared by a
+// day reset or trimmed by a quota never counts. Confirmed bars only, like
+// every other sweep in the tool.
+drawHit = drawSwept
+
+alertcondition(firstLive,        "Dealing range framed",   "Dealing range framed")
+alertcondition(rangeReframed,    "Dealing range reframed", "Opposing liquidity purged - the working pair changed")
+alertcondition(boundaryExtended, "Boundary extended",      "The tracking boundary extended to a new extreme")
+alertcondition(drawHit,   "Draw reached",           "Price reached the draw pool")
+alertcondition(poolHi,    "BSL swept",              "Buy-side liquidity swept")
+alertcondition(poolLo,    "SSL swept",              "Sell-side liquidity swept")
+alertcondition(dlvFormed, "Delivery range formed",  "A raid followed by a close through structure formed a delivery range")
+alertcondition(frmContracted, "IPDA Frame contracted", "Time event, not a liquidity event: an IPDA Frame boundary aged out of the lookback and moved to the extreme inside the window")
+alertcondition(rgFormed,  "Ranging detected",       "Price is ranging: relative equal highs and lows inside a tight box")
+alertcondition(rgBrokeHi, "Ranging broken - BSL",   "Price closed above the ranging box or ran through its high")
+alertcondition(rgBrokeLo, "Ranging broken - SSL",   "Price closed below the ranging box or ran through its low")
