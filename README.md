@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/33138342/README.md)
+[README.md](https://github.com/user-attachments/files/33212426/README.md)
 # MTF Liquidity Dealing Range
 
 A TradingView indicator (Pine Script v6) that builds the dealing range from liquidity that has actually been taken, across several timeframes at once.
@@ -21,7 +21,7 @@ It tells you where price sits inside a range that liquidity has defined. It does
 
 **Volume context.** Optional. A volume profile and point of control anchored to the range.
 
-**Ranging box.** Optional and experimental. Marks a consolidation and keeps the sweeps inside it from moving the range. See below.
+**Ranging box.** Optional and experimental. A dotted early box warns that a consolidation may be forming. A confirmed box marks one that has, and keeps the sweeps inside it from moving the range. See below.
 
 ## Reading it
 
@@ -63,32 +63,50 @@ Only sources at or above the chart timeframe are used. On a 1H chart that is 1H,
 
 Off by default. This is my rule, not ICT's.
 
-Consolidations have cost me dearly, and the first version of this feature never fired once in daily use. It was rebuilt against consolidations I marked by hand.
+Consolidations have cost me dearly, and the first version of this feature never fired once in daily use. It was rebuilt against consolidations I marked by hand, then rebuilt again after the early version boxed trends on a 15m chart.
 
-**What counts as ranging.** Candles building sideways and tight, printing relative equal highs and relative equal lows. In the script that is:
+**What counts as ranging.** Candles building sideways and tight against a level that keeps holding, printing relative equal highs and relative equal lows. In the script that is the full count:
 
-- at least two swing highs near the top of the box and two swing lows near the bottom, on the chart's own timeframe
-- "near" means within the equal tolerance, 0.5 × ATR by default
+- at least two swing highs at one level in the top third of the box, and two swing lows at one level in the bottom third, on the chart's own timeframe
+- "at one level" means within the equal tolerance of each other, 0.5 × ATR by default
 - the whole box, wick to wick, no taller than 3.5 × ATR
 - two highs only count as two if price pulled back a third of the box between them, and the same for lows
+- a spike past the level can sit inside the box, so support that keeps holding under a stray wick still counts, unless a displacement candle printed the spike
 
-**Two ways it can show sooner.** Both are on by default and can be unticked.
+**Steps are not ranges.** When one box forms after another and both its high and low have moved the same way, the two overlap, and price never went far past the old box's other side in between, they are steps in a trend. Neither is shown, and neither holds back sweeps from the range. This is fixed, not a setting. The first step can only be recognised when the second one forms, so it shows as ranging until then.
 
-- *Early after displacement.* If the box begins within six candles after a displacement candle, it may show one touch short. Labelled `Ranging (early)`.
-- *Early on tight bodies.* If the bodies of the last six candles sit inside a band of 1 × ATR, it may show on one equal high and one equal low. Labelled `Ranging (tight)`.
+**Two boxes.**
 
-No early box may contain a displacement candle. Bodies only decide when the box may appear. The box itself always runs from the highest high to the lowest low.
+- *Confirmed.* The full count has printed. Drawn in the style you pick, labelled `Ranging`. This is the only box that affects the dealing range.
+- *Early.* Dotted by default, with its own colour and border style, and a warning only. It says a consolidation may be forming. It is replaced by the confirmed box when the full count prints, and withdrawn when price breaks it or twelve candles pass without confirmation.
 
-**How it ends.** A wick that pokes an edge by less than the tolerance is another equal high or low, and the box stretches to it. A candle close beyond an edge, or a wick that runs well through it, ends the box. The box is drawn to the last candle inside it.
+An early box comes from one of two routes, both on by default:
 
-**What it does to the range.** While a box is live, sweeps of pools strictly inside it do not reach Rotation, IPDA Frame or Delivery. The register still marks them swept. The sweep that breaks the box passes through as the first side.
+- *After displacement.* The box begins within six candles after a displacement candle and is one touch short of the count. Labelled `Ranging (early)`.
+- *Tight bodies.* The bodies of the last six candles sit inside a band of 1 × ATR, with one equal high and one equal low. Labelled `Ranging (tight)`.
 
-**What to expect.**
+No early box may contain a displacement candle. Bodies only decide when it may appear. Every box runs from the highest high to the lowest low.
 
-- It is late by nature. A consolidation cannot be recognised until it has made its touches. On the sample I calibrated on, the box appeared about 55 minutes into the consolidation on average with both early routes on, and about 80 minutes with both off.
-- The defaults were fitted to seven consolidations on one symbol, on a 5m chart, over two days. Treat them as a starting point and check them on your own market.
-- A quiet market produces more short boxes when the tight-bodies route is on.
-- Swing length 1 shows boxes sooner and produces more of them. If you try it, untick both early routes first.
+**How a box ends.** A wick that pokes an edge by less than the wick tolerance, 0.25 × ATR by default, is one more equal high or low, and the box stretches to it. That tolerance is measured from the edge the box started with, so repeated pokes cannot walk it into a breakout. A candle close beyond an edge, or a wick that goes further than the tolerance, ends the box on the candle before.
+
+**What it does to the range.** While a confirmed box is live, sweeps of pools strictly inside it do not reach Rotation, IPDA Frame or Delivery. The register still marks them swept. The sweep that breaks the box passes through as the first side. An early box changes nothing.
+
+**How often the early box is right.** Most of the time it is not, and that is the price of the warning. I measured it on one symbol:
+
+| Chart | Early boxes | Went on to confirm | Warning before confirmation |
+|---|---|---|---|
+| 15m, 22 days | 68 | 8, about 1 in 8 | 5 candles |
+| 5m, 3 days | 19 | 7, about 1 in 3 | 7 candles |
+
+A withdrawn early box usually lasted a few candles, never more than twelve. Nothing I tested could tell a failing one sooner than the break itself without also withdrawing real ranges. A range making its first move from the low to the high looks the same as an uptrend until it turns back or closes outside.
+
+The confirmed box is the reliable one and the late one. On the 5m sample it showed about 80 minutes into the consolidation.
+
+**What else to expect.**
+
+- With "Show withdrawn" off, the chart keeps only what confirmed, so history looks cleaner than it was live. Turn it on to see every warning that was given.
+- The width and tolerance defaults were fitted to seven hand-marked consolidations on a 5m chart. Check them on your own market.
+- Swing length 1 shows boxes sooner and produces more of them.
 
 | Setting | Default |
 |---|---|
@@ -96,9 +114,13 @@ No early box may contain a displacement candle. Bodies only decide when the box 
 | Max width (x ATR) | 3.5 |
 | Min swings per side | 2 |
 | Equal tolerance (x ATR) | 0.5 |
+| Wick tolerance (x ATR) | 0.25 |
 | Early after displacement, body x ATR | On, 1.5 |
 | Early on tight bodies, candles / band x ATR | On, 6 / 1.0 |
-| Show box, colour, border style | On, solid |
+| Withdraw early box after (candles) | 12 |
+| Early box, colour and border style | Dotted |
+| Show withdrawn | Off |
+| Show box, colour and border style | On, solid |
 | Boxes shown | 5 |
 
 ## Table
@@ -116,8 +138,10 @@ Range state, range high and low, delivery, equilibrium, position, last sweep, dr
 | BSL swept / SSL swept | Any registered pool on that side is taken |
 | Delivery range formed | A raid is followed by a close through structure |
 | IPDA Frame contracted | A boundary ages out of the lookback. A time event, not a liquidity event |
-| Ranging detected | A ranging box goes live |
-| Ranging broken - BSL / SSL | Price closes beyond the box or runs through an edge |
+| Ranging early | A dotted early box appears. Not confirmed |
+| Ranging confirmed | The full count prints and the confirmed box goes live |
+| Ranging withdrawn | An early box is broken or runs out of time |
+| Ranging broken - BSL / SSL | Price closes beyond the confirmed box or runs through an edge |
 
 Sweeps, ranges and ranging boxes are all decided on closed candles.
 
