@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/33212426/README.md)
+[README (1).md](https://github.com/user-attachments/files/33213487/README.1.md)
 # MTF Liquidity Dealing Range
 
 A TradingView indicator (Pine Script v6) that builds the dealing range from liquidity that has actually been taken, across several timeframes at once.
@@ -72,6 +72,7 @@ Consolidations have cost me dearly, and the first version of this feature never 
 - the whole box, wick to wick, no taller than 3.5 × ATR
 - two highs only count as two if price pulled back a third of the box between them, and the same for lows
 - a spike past the level can sit inside the box, so support that keeps holding under a stray wick still counts, unless a displacement candle printed the spike
+- the level has to be holding when the box confirms: the candle that completes the count must close back inside the equal levels, within the wick tolerance
 
 **Steps are not ranges.** When one box forms after another and both its high and low have moved the same way, the two overlap, and price never went far past the old box's other side in between, they are steps in a trend. Neither is shown, and neither holds back sweeps from the range. This is fixed, not a setting. The first step can only be recognised when the second one forms, so it shows as ranging until then.
 
