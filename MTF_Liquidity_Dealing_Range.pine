@@ -90,6 +90,10 @@
 //     last box's far edge in between, is a step in a trend, not a range.
 //     It is not drawn and gates nothing, and the last box is taken off the
 //     chart as a step too.
+//   - Ranging, seventh pass. A box can only confirm while price is back
+//     inside its equal levels, within the wick tolerance. The spike
+//     allowance let a box confirm on the very candle that had closed
+//     through its support.
 //
 // Layer 3 - equilibrium, position, draw, table, alerts.
 //
@@ -997,8 +1001,10 @@ else if barstate.islast
 // tolerance of it are its touches. Two touches count as two only when
 // price pulled back at least RG_PULL of the box between them. A spike past
 // the level may sit inside the box - support that keeps holding under a
-// stray wick - unless a displacement candle printed the spike. Of every
-// run of swings that qualifies, the oldest start is taken.
+// stray wick - unless a displacement candle printed the spike. The level
+// has to be holding when the box confirms: the close must be back inside
+// the two equal levels, within the wick tolerance. Of every run of swings
+// that qualifies, the oldest start is taken.
 //
 // Steps: a confirmed box whose high and low both moved the same way from
 // the last confirmed box, that overlaps it, and with price never more
@@ -1147,6 +1153,8 @@ f_rgFind(int since, bool allowEarly) =>
             float sep = RG_PULL * (bMax - bMin)
             int   nh  = 0
             int   nl  = 0
+            float hiLvl = na
+            float loLvl = na
             for c0 = k to 0
                 cand = rgSw.get(c0)
                 bool inBand = cand.hi ? cand.p >= bMax - H3 : cand.p <= bMin + H3
@@ -1167,11 +1175,15 @@ f_rgFind(int since, bool allowEarly) =>
                         if not (spiky and (cand.hi ? dMax : dMin))
                             if cand.hi
                                 nh := n
+                                hiLvl := cand.p
                             else
                                 nl := n
+                                loLvl := cand.p
             // j is now the number of candles in this run, and points at
             // the candle just before its first one
-            bool full  = nh >= rgMin and nl >= rgMin
+            // the full count, and the levels still holding on this close
+            float hold = rgPokeX * nz(atrVal, 0)
+            bool full  = nh >= rgMin and nl >= rgMin and close >= loLvl - hold and close <= hiLvl + hold
             bool early = false
             if allowEarly and rgEarly and not full and not hasD and nh + nl >= 2 * rgMin - 1 and math.min(nh, nl) >= rgMin - 1
                 for w = 0 to RG_DISP_W - 1
