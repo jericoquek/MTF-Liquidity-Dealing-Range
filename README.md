@@ -1,4 +1,3 @@
-[README (1).md](https://github.com/user-attachments/files/33213487/README.1.md)
 # MTF Liquidity Dealing Range
 
 A TradingView indicator (Pine Script v6) that builds the dealing range from liquidity that has actually been taken, across several timeframes at once.
@@ -20,8 +19,6 @@ It tells you where price sits inside a range that liquidity has defined. It does
 **Odds.** Every live level is priced as the chance of reaching it before a 1R stop with no edge at all. It is the number your read has to beat, not a forecast.
 
 **Volume context.** Optional. A volume profile and point of control anchored to the range.
-
-**Ranging box.** Optional and experimental. A dotted early box warns that a consolidation may be forming. A confirmed box marks one that has, and keeps the sweeps inside it from moving the range. See below.
 
 ## Reading it
 
@@ -46,83 +43,27 @@ If one candle takes both sides, the script does not guess which came first. It a
 | Group | What is in it |
 |---|---|
 | 1. Timeframes | Five swing sources (1H, 4H and Daily on; Weekly and 15m off), levels kept per tag, swing length |
-| 2. Sessions | Three sessions with editable names and times, New York time. Off by default |
-| 3. Daily levels | PDH / PDL from the completed daily bar. Daily reset |
+| 2. Sessions | Three sessions with editable names and times, New York time. Asia 20:00–00:00 and London 02:00–05:00 on, New York 09:30–12:00 off |
+| 3. Daily levels | PDH / PDL from the completed daily bar. Daily reset. CME clock for perps |
 | 4. Register style | Line style, swept-level history, origin labels, hide levels beyond a distance, merge tolerance |
 | 5. Dealing range | The three ranges, primary selector, labels, colours, premium / discount box |
 | 6. Delivery range | Toggle and style |
 | 7. Draw | Mark the draw |
 | 8. Odds | Risk from an ATR multiple, manual points or the last swing. Round-trip cost. How far out to price |
 | 9. Volume context | POC line, profile, row height, lookback |
-| 10. Ranging | See below |
-| 11. Table | Position and size |
+| 10. Table | Position and size |
 
 Only sources at or above the chart timeframe are used. On a 1H chart that is 1H, 4H and Daily. On a 4H chart, 4H and Daily. A source finer than the chart is skipped, not approximated.
 
-## Ranging (experimental)
+## CME clock
 
-Off by default. This is my rule, not ICT's.
+I trade perps that mirror CME markets, and a perp keeps printing when CME is shut. A weekend wick on XYZ100 that takes a 1H high never happened on NQ, and it should not frame a range. So on a trade.xyz market (HIP3XYZ) or Binance's CL perp, on an intraday chart, the script reads the perp as the futures contract would print it:
 
-Consolidations have cost me dearly, and the first version of this feature never fired once in daily use. It was rebuilt against consolidations I marked by hand, then rebuilt again after the early version boxed trends on a 15m chart.
+- candles from Friday 17:00 to Sunday 18:00 New York, and in the daily 17:00 to 18:00 halt, are ignored. They sweep no level, move no range, build no session and print no swing
+- the day runs 18:00 to 17:00 New York, as on CME. The daily roll, PDH / PDL and the IPDA day count follow that day, and PDH / PDL are taken from the candles CME would have printed
+- a higher-timeframe swing whose candle opened while CME was shut is dropped. The candles around it are still the perp's own, so a weekend spike can occasionally stop a Friday high from counting as a swing
 
-**What counts as ranging.** Candles building sideways and tight against a level that keeps holding, printing relative equal highs and relative equal lows. In the script that is the full count:
-
-- at least two swing highs at one level in the top third of the box, and two swing lows at one level in the bottom third, on the chart's own timeframe
-- "at one level" means within the equal tolerance of each other, 0.5 × ATR by default
-- the whole box, wick to wick, no taller than 3.5 × ATR
-- two highs only count as two if price pulled back a third of the box between them, and the same for lows
-- a spike past the level can sit inside the box, so support that keeps holding under a stray wick still counts, unless a displacement candle printed the spike
-- the level has to be holding when the box confirms: the candle that completes the count must close back inside the equal levels, within the wick tolerance
-
-**Steps are not ranges.** When one box forms after another and both its high and low have moved the same way, the two overlap, and price never went far past the old box's other side in between, they are steps in a trend. Neither is shown, and neither holds back sweeps from the range. This is fixed, not a setting. The first step can only be recognised when the second one forms, so it shows as ranging until then.
-
-**Two boxes.**
-
-- *Confirmed.* The full count has printed. Drawn in the style you pick, labelled `Ranging`. This is the only box that affects the dealing range.
-- *Early.* Dotted by default, with its own colour and border style, and a warning only. It says a consolidation may be forming. It is replaced by the confirmed box when the full count prints, and withdrawn when price breaks it or twelve candles pass without confirmation.
-
-An early box comes from one of two routes, both on by default:
-
-- *After displacement.* The box begins within six candles after a displacement candle and is one touch short of the count. Labelled `Ranging (early)`.
-- *Tight bodies.* The bodies of the last six candles sit inside a band of 1 × ATR, with one equal high and one equal low. Labelled `Ranging (tight)`.
-
-No early box may contain a displacement candle. Bodies only decide when it may appear. Every box runs from the highest high to the lowest low.
-
-**How a box ends.** A wick that pokes an edge by less than the wick tolerance, 0.25 × ATR by default, is one more equal high or low, and the box stretches to it. That tolerance is measured from the edge the box started with, so repeated pokes cannot walk it into a breakout. A candle close beyond an edge, or a wick that goes further than the tolerance, ends the box on the candle before.
-
-**What it does to the range.** While a confirmed box is live, sweeps of pools strictly inside it do not reach Rotation, IPDA Frame or Delivery. The register still marks them swept. The sweep that breaks the box passes through as the first side. An early box changes nothing.
-
-**How often the early box is right.** Most of the time it is not, and that is the price of the warning. I measured it on one symbol:
-
-| Chart | Early boxes | Went on to confirm | Warning before confirmation |
-|---|---|---|---|
-| 15m, 22 days | 68 | 8, about 1 in 8 | 5 candles |
-| 5m, 3 days | 19 | 7, about 1 in 3 | 7 candles |
-
-A withdrawn early box usually lasted a few candles, never more than twelve. Nothing I tested could tell a failing one sooner than the break itself without also withdrawing real ranges. A range making its first move from the low to the high looks the same as an uptrend until it turns back or closes outside.
-
-The confirmed box is the reliable one and the late one. On the 5m sample it showed about 80 minutes into the consolidation.
-
-**What else to expect.**
-
-- With "Show withdrawn" off, the chart keeps only what confirmed, so history looks cleaner than it was live. Turn it on to see every warning that was given.
-- The width and tolerance defaults were fitted to seven hand-marked consolidations on a 5m chart. Check them on your own market.
-- Swing length 1 shows boxes sooner and produces more of them.
-
-| Setting | Default |
-|---|---|
-| Swing length | 2 |
-| Max width (x ATR) | 3.5 |
-| Min swings per side | 2 |
-| Equal tolerance (x ATR) | 0.5 |
-| Wick tolerance (x ATR) | 0.25 |
-| Early after displacement, body x ATR | On, 1.5 |
-| Early on tight bodies, candles / band x ATR | On, 6 / 1.0 |
-| Withdraw early box after (candles) | 12 |
-| Early box, colour and border style | Dotted |
-| Show withdrawn | Off |
-| Show box, colour and border style | On, solid |
-| Boxes shown | 5 |
+It is on by default ("Hold perpetual futures to the CME clock" in group 3), with the same symbol list and setting name as Dealing Range Liquidity Reversal. A true crypto perp is never clocked, and futures charts are never affected. If your perp is on another exchange, it is not on the list and runs 24/7.
 
 ## Table
 
@@ -139,16 +80,13 @@ Range state, range high and low, delivery, equilibrium, position, last sweep, dr
 | BSL swept / SSL swept | Any registered pool on that side is taken |
 | Delivery range formed | A raid is followed by a close through structure |
 | IPDA Frame contracted | A boundary ages out of the lookback. A time event, not a liquidity event |
-| Ranging early | A dotted early box appears. Not confirmed |
-| Ranging confirmed | The full count prints and the confirmed box goes live |
-| Ranging withdrawn | An early box is broken or runs out of time |
-| Ranging broken - BSL / SSL | Price closes beyond the confirmed box or runs through an edge |
 
-Sweeps, ranges and ranging boxes are all decided on closed candles.
+Sweeps and ranges are all decided on closed candles.
 
 ## What it does not do
 
 - It does not call direction.
+- It does not detect consolidation. I tried, against consolidations I marked by hand, and swings plus ATR could not tell a range from a trend reliably enough to trust. Every registered sweep reaches the range engines.
 - It does not guess the order when one candle takes both sides.
 - It does not treat a range boundary as unswept liquidity.
 - It does not see past the history TradingView has loaded. A 40 or 60 day IPDA frame may not be available on a 1m or 5m chart.

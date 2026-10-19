@@ -22,10 +22,6 @@
 //                older than the IPDA lookback of 20, 40 or 60 Daily bars.
 //   Delivery - its own toggle. A raid, then a confirmed close through the
 //     last opposing chart-TF swing. Raid extreme to displacement extreme.
-//   Ranging - candles building sideways and tight, printing relative equal
-//     highs and relative equal lows on the chart timeframe. While a
-//     confirmed box is live, sweeps of pools inside it reach none of the
-//     above. An early box is a warning only and gates nothing.
 //   One primary range feeds everything downstream, including the
 //   premium / discount box.
 //
@@ -35,7 +31,17 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
-//   - Ranging added as group 10. Table moved to group 11.
+//   - CME clock. A perpetual that mirrors a CME market (trade.xyz,
+//     Binance CL) is read as the futures contract would print it on an
+//     intraday chart: candles from Friday 17:00 to Sunday 18:00 New York
+//     and in the daily 17:00-18:00 halt are ignored. They sweep nothing,
+//     move no range, start no session and print no swing. The day runs
+//     18:00 to 17:00 New York, and PDH / PDL come from that day. Same
+//     symbol list and setting name as Dealing Range Liquidity Reversal.
+//   - Ranging removed. Detecting consolidation from swings and ATR could
+//     not tell a range from a trend reliably enough to gate sweeps, so
+//     every registered sweep now reaches the range engines. The table is
+//     group 10.
 //   - Frame capped by an IPDA lookback. Without it a widen-only frame
 //     converged on the whole loaded history. Delivery moved to its own
 //     toggle in group 6.
@@ -43,7 +49,7 @@
 //     suspends direction; primary falls back to a LIVE range; IPDA
 //     contraction waits for a full window; a contraction no longer reports
 //     as a liquidity reframe; Draw reached tests the pool that was the
-//     draw before the bar; wick cache 24; ranging OFF by default.
+//     draw before the bar; wick cache 24.
 //   - Volume profile placement: profile gap and profile width are independent.
 //     The histogram is anchored outside the primary range's right edge, so
 //     changing its width no longer drags it back over price or the P/D box.
@@ -51,49 +57,6 @@
 //     together. Draw reached fires only when the exact registered pool that
 //     was the draw is swept - not when it is cleared by a day reset or
 //     trimmed by a quota.
-//   - Ranging rebuilt. It never fired below the register's finest source:
-//     the box was built from register swings (1H on a 5m chart) and a
-//     single wick one tick past an edge ended it. It now reads chart
-//     timeframe swings, needs relative equal highs and lows inside a width
-//     cap measured on the wicks, survives a poke that only prints another
-//     equal high or low, and ends on a close beyond an edge or a run
-//     through it. Past boxes stay on the chart. New alert: Ranging detected.
-//   - Ranging, second pass. Own swing length, separate from the register.
-//     Two equal highs only count as two when price pulled back a third of
-//     the box between them, same for lows. A box that begins right after a
-//     displacement candle may show one touch early. The box is drawn to
-//     the last candle inside it, not to the candle that broke it. The
-//     number of boxes kept on the chart is an input.
-//   - Ranging, third pass. Second early route: when the bodies of the
-//     last few candles sit inside a narrow band, a box may show on one
-//     equal high and one equal low. Bodies only decide when; the box is
-//     still drawn wick to wick. No early box, of either kind, may contain
-//     a displacement candle. Box border style is an input.
-//   - Ranging, fourth pass. Two stages. A CONFIRMED box needs the full
-//     count and is the only thing that holds sweeps back from the range
-//     engines. The two early routes now draw a separate dotted EARLY box
-//     for awareness only: it is replaced when the full count prints, and
-//     withdrawn when price breaks it or it waits too long. Over 22 days of
-//     15m about one early box in eight confirmed; one in three on 5m. A
-//     box may only stretch within one tolerance of the edge it went live
-//     with - before, repeated pokes let it creep into a breakout leg.
-//   - Ranging, fifth pass. The wick tolerance is its own input and much
-//     tighter than the equal tolerance: a wick 0.48 ATR under the lows was
-//     being taken as another equal low and the box followed it down. The
-//     early box has its own colour and border style.
-//   - Ranging, sixth pass. Two fixed rules, no inputs. Support: an equal
-//     level counts anywhere in the outer third of the box, so a spike past
-//     a level that keeps holding no longer hides it - unless a
-//     displacement candle printed the spike. Steps: a confirmed box whose
-//     high and low both moved the same way from the last box, overlapping
-//     it, with price never going more than the equal tolerance past the
-//     last box's far edge in between, is a step in a trend, not a range.
-//     It is not drawn and gates nothing, and the last box is taken off the
-//     chart as a step too.
-//   - Ranging, seventh pass. A box can only confirm while price is back
-//     inside its equal levels, within the wick tolerance. The spike
-//     allowance let a box confirm on the very candle that had closed
-//     through its support.
 //
 // Layer 3 - equilibrium, position, draw, table, alerts.
 //
@@ -182,28 +145,6 @@ type Dlv
     bool  formed = false
     bool  extended = false
 
-// a chart-timeframe swing, for the ranging box
-type Swg
-    float p
-    bool  hi
-    int   t
-
-// a ranging box, confirmed or early
-type RgBox
-    bool  on = false
-    float hi
-    float lo
-    float hi0           // the edges it went live with; stretch is measured from these
-    float lo0
-    int   l             // left edge, bar time
-    int   born          // bar_index it went live on
-    float cap           // width cap and wick tolerance, fixed when it goes live
-    float tol
-    int   kind = 0      // 0 full count, 1 early after displacement, 2 tight bodies
-    bool  step = false  // a step in a trend: tracked, never drawn, gates nothing
-    float atr           // ATR when it went live
-    box   bx
-
 // ═════════════════════════════════════════════════════════════
 // Inputs
 // ═════════════════════════════════════════════════════════════
@@ -224,25 +165,26 @@ src5On = input.bool(false, "TF 5", inline = "t5", group = gSrc)
 src5Tf = input.timeframe("15",  "", inline = "t5", group = gSrc)
 
 gSess = "2. Sessions"
-s1On   = input.bool(false, "", inline = "s1", group = gSess)
-s1Name = input.string("A", "", inline = "s1", group = gSess)
-s1Time = input.session("1800-0100", "", inline = "s1", group = gSess)
+s1On   = input.bool(true, "", inline = "s1", group = gSess)
+s1Name = input.string("Asia", "", inline = "s1", group = gSess)
+s1Time = input.session("2000-0000", "", inline = "s1", group = gSess)
 s1Col  = input.color(color.new(#424351, 50), "", inline = "s1", group = gSess)
 
-s2On   = input.bool(false, "", inline = "s2", group = gSess)
-s2Name = input.string("L", "", inline = "s2", group = gSess)
-s2Time = input.session("0100-0800", "", inline = "s2", group = gSess)
+s2On   = input.bool(true, "", inline = "s2", group = gSess)
+s2Name = input.string("London", "", inline = "s2", group = gSess)
+s2Time = input.session("0200-0500", "", inline = "s2", group = gSess)
 s2Col  = input.color(color.new(#424351, 50), "", inline = "s2", group = gSess)
 
 s3On   = input.bool(false, "", inline = "s3", group = gSess)
-s3Name = input.string("N", "", inline = "s3", group = gSess)
-s3Time = input.session("0800-1200", "", inline = "s3", group = gSess)
+s3Name = input.string("New York", "", inline = "s3", group = gSess)
+s3Time = input.session("0930-1200", "", inline = "s3", group = gSess)
 s3Col  = input.color(color.new(#424351, 50), "", inline = "s3", group = gSess)
 
 gDay = "3. Daily levels"
-pdOn       = input.bool(true,  "PDH / PDL", inline = "d", group = gDay, tooltip = "Taken from the symbol's completed Daily bar, so it agrees with what a Daily chart shows.")
+pdOn       = input.bool(true,  "PDH / PDL", inline = "d", group = gDay, tooltip = "Taken from the symbol's completed Daily bar, so it agrees with what a Daily chart shows. On the CME clock, taken from the previous CME day, 18:00 to 17:00 New York.")
 pdCol      = input.color(color.new(#424351, 50), "", inline = "d", group = gDay)
 dailyReset = input.bool(false, "Daily reset", group = gDay, tooltip = "Clear every level when the Daily bar rolls. Off clears only session and PDH/PDL levels.")
+cmeClockOn = input.bool(true, "Hold perpetual futures to the CME clock", group = gDay, tooltip = "Applies only to perpetual futures that mirror a CME market (every trade.xyz / HIP3XYZ market, BINANCE:CLUSDT.P), and only on intraday charts. On: candles from Friday 17:00 to Sunday 18:00 New York and in the daily 17:00-18:00 halt are ignored, as on the futures contract. They sweep no level, move no range, build no session and print no swing. The day runs 18:00 to 17:00 New York, so the daily roll, PDH / PDL and the IPDA day count follow CME. Off: the perpetual is read 24/7 on its own daily bar. Futures charts are never affected.")
 
 gStyle = "4. Register style"
 lblSize     = input.string("Small", "Pane labels", options = ["Tiny", "Small", "Normal", "Large"], group = gStyle)
@@ -320,28 +262,7 @@ vcBinMult  = input.float(0.2, "x", minval = 0.02, maxval = 2.0, step = 0.02, inl
 vcMaxRows  = input.int(150, "Max rows", minval = 10, maxval = 400, group = gVc, tooltip = "Caps the row count on very tall ranges. When the cap bites, row height is recomputed so the rows still tile the range exactly.")
 vcMaxLook  = input.int(1000, "Max lookback (bars)", minval = 50, maxval = 1900, group = gVc, tooltip = "Safety cap. If the range anchor is older than this, the profile starts here instead of at the anchor.")
 
-gRg = "10. Ranging (experimental)"
-rgOn   = input.bool(false, "Detect ranging", group = gRg, tooltip = "An implementation rule, not part of the dealing-range definition. Ranging is candles building sideways and tight against a level that keeps holding, printing relative equal highs and relative equal lows, read from the chart timeframe's own swings. Boxes that step higher or lower one after another are steps in a trend and are not shown. There are two boxes. A CONFIRMED box needs the full count below and draws in the style you pick. While it is live, sweeps of pools strictly inside it reach no range engine; the register still marks them swept. An EARLY box is dotted and is a warning only: it changes nothing in the range. A close beyond an edge, or a wick that runs through it, ends a box. Switch off for a pure baseline comparison.")
-rgLen  = input.int(2, "Swing length", minval = 1, maxval = 10, group = gRg, tooltip = "Bars either side of a swing high or low, on the chart timeframe. Ranging only - the register keeps its own swing length in group 1. 2 is the tested default. 1 confirms a swing one bar after it prints, so boxes show sooner, but there are more of them and some break up.")
-rgAtrX = input.float(3.5, "Max width (x ATR)", minval = 0.5, maxval = 20, step = 0.5, group = gRg, tooltip = "How tall the box may be, wick to wick, in chart ATR(14). This is what tight means. Calibrated on hand-marked consolidations on a 5m chart: they measured 1.9 to 3.4. Raise it and wider chop qualifies; go too far and a dealing range with rotation inside it gets treated as chop.")
-rgMin  = input.int(2, "Min swings per side", minval = 2, maxval = 6, group = gRg, tooltip = "The full count: how many relative equal highs at the top of the box, and relative equal lows at the bottom, each. Two highs only count as two when price pulled back at least a third of the box between them, and the same for lows, so one visit to an edge is one touch. 2 is the earliest a confirmed box can show. 3 waits for a third touch on both sides: fewer boxes, later.")
-rgEqX  = input.float(0.5, "Equal tolerance (x ATR)", minval = 0.05, maxval = 3, step = 0.05, group = gRg, tooltip = "How close to the box edge a swing must sit, inside the box, to count as a relative equal high or low. In chart ATR(14). This only decides which swings count toward the box forming.")
-rgPokeX = input.float(0.25, "Wick tolerance (x ATR)", minval = 0, maxval = 3, step = 0.05, group = gRg, tooltip = "How far a wick may go past the edge the box went live with and still be one more equal high or low. Within this, the box stretches to the wick and carries on. Beyond it, the edge has been run and the box ends on the candle before. A close beyond an edge always ends it. The box cannot creep further than this however many times it is poked. 0 ends the box on any wick past the edge.")
-rgEarly = input.bool(true, "Early after displacement", inline = "re", group = gRg)
-rgDispX = input.float(1.5, "body x ATR", minval = 0.5, maxval = 10, step = 0.25, inline = "re", group = gRg, tooltip = "Early box, labelled Ranging (early). A run whose first candle comes within 6 candles after a displacement candle may show one touch short of the full count: two equal highs and one low, or two lows and one high. A displacement candle is one whose body is at least this many times the ATR(14) of the candle before it. No early box may contain a displacement candle.")
-rgBody  = input.bool(true, "Early on tight bodies", inline = "rb", group = gRg)
-rgBodyN = input.int(6, "candles", minval = 3, maxval = 30, inline = "rb", group = gRg)
-rgBodyW = input.float(1.0, "band x ATR", minval = 0.25, maxval = 5, step = 0.25, inline = "rb", group = gRg, tooltip = "Early box, labelled Ranging (tight). When the bodies of the last N candles all sit inside a band this many chart ATR(14) tall, a box may show on one equal high and one equal low. Bodies only decide when it may show - it is still drawn wick to wick. This is the loosest route: it cannot tell a range from a leg and a pause, which is why it only ever draws an early box.")
-rgWait  = input.int(12, "Withdraw early box after (candles)", minval = 2, maxval = 100, group = gRg, tooltip = "An early box is a possible consolidation, nothing more. It is replaced by a confirmed box when the full count prints. It is withdrawn when price breaks it, or when this many candles pass without confirmation. Measured over 22 days of 15m, about one early box in eight went on to confirm, with five candles of warning; on 5m about one in three, with seven. Nothing tested could tell a failing one sooner than the break itself without also withdrawing real ranges.")
-rgColB  = input.color(color.new(#7E57C2, 30), "Early box", inline = "rx", group = gRg)
-rgStyB  = input.string("Dotted", "", options = ["Solid", "Dashed", "Dotted"], inline = "rx", group = gRg, tooltip = "Colour and border of the early box, the one that is still developing. A withdrawn box keeps this colour, faded.")
-rgGone  = input.bool(false, "Show withdrawn", group = gRg, tooltip = "Off: a withdrawn early box is removed, so the chart keeps only what confirmed. That makes history look cleaner than it was live. On: withdrawn boxes stay, faded and labelled Withdrawn, so you can see every warning that was given.")
-rgShow = input.bool(true, "Show box", inline = "rg", group = gRg)
-rgCol  = input.color(color.new(#7E57C2, 30), "", inline = "rg", group = gRg)
-rgSty  = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "rg", group = gRg, tooltip = "Shows or hides both boxes. The colour and border here are the confirmed box's; the early box has its own row above.")
-rgKeep = input.int(5, "Boxes shown", minval = 1, maxval = 20, group = gRg, tooltip = "How many confirmed boxes stay on the chart, newest first. Older ones are removed. The same number applies to withdrawn boxes when they are shown.")
-
-gTbl = "11. Table"
+gTbl = "10. Table"
 tblOn     = input.bool(false, "Show table", group = gTbl)
 tblPos    = input.string("Top right", "Position", options = ["Top right", "Top left", "Bottom right", "Bottom left", "Middle right"], group = gTbl)
 tblSize   = input.string("Normal", "Text size", options = ["Tiny", "Small", "Normal", "Large"], group = gTbl)
@@ -356,8 +277,6 @@ tblBorder = input.color(#F4F4F7, "Border", inline = "tb", group = gTbl)
 const int MAX_SWEPT  = 200
 const int MAX_SCAN   = 500
 const int WICK_CACHE = 24
-const float RG_PULL  = 0.33   // pullback between two equal highs or lows, as a share of the box
-const int RG_DISP_W  = 6      // candles after a displacement in which a box may begin early
 
 var array<Level> live = array.new<Level>()
 var array<Level> done = array.new<Level>()
@@ -399,6 +318,37 @@ max_bars_back(time, MAX_SCAN)
 max_bars_back(high, VC_BUF)
 max_bars_back(low, VC_BUF)
 max_bars_back(volume, VC_BUF)
+
+// ═════════════════════════════════════════════════════════════
+// CME clock
+//
+// CME futures only print while CME trades, so they need nothing here. 24/7
+// perps that mirror a CME market are held to the CME calendar: nothing counts
+// from Friday 17:00 NY to Sunday 18:00 NY, or in the daily 17:00-18:00 halt.
+// The list is explicit on purpose: a true crypto perp has no CME session to
+// mirror and must not be clocked. Same list as Dealing Range Liquidity
+// Reversal.
+//   HIP3XYZ:*            every trade.xyz market (XYZ100, SP500, GOLD, ...)
+//   BINANCE:CLUSDT.P     Binance crude oil perp
+// ═════════════════════════════════════════════════════════════
+
+bool isClPerp   = (syminfo.prefix == "BINANCE" and syminfo.ticker == "CLUSDT.P") or str.contains(syminfo.tickerid, "BINANCE:CLUSDT.P")
+bool onCmeClock = cmeClockOn and timeframe.isintraday and (syminfo.prefix == "HIP3XYZ" or str.contains(syminfo.ticker, "XYZ100") or isClPerp)
+
+// true while CME is shut at time t
+f_cmeShut(int t) =>
+    int dw = dayofweek(t, "America/New_York")
+    int hm = hour(t, "America/New_York") * 60 + minute(t, "America/New_York")
+    dw == dayofweek.saturday or (dw == dayofweek.sunday and hm < 1080) or (dw == dayofweek.friday and hm >= 1020) or (hm >= 1020 and hm < 1080)
+
+bool cmeOpen = not onCmeClock or not f_cmeShut(time)
+
+// the CME day runs 18:00 to 17:00 New York; key it by the date six hours on
+int cmeKey = year(time + 21600000, "America/New_York") * 10000 + month(time + 21600000, "America/New_York") * 100 + dayofmonth(time + 21600000, "America/New_York")
+var int cmeLastKey = na
+bool cmeNewDay = cmeOpen and (na(cmeLastKey) or cmeKey != cmeLastKey)
+if barstate.isconfirmed and cmeOpen
+    cmeLastKey := cmeKey
 
 // ═════════════════════════════════════════════════════════════
 // Helpers
@@ -596,9 +546,9 @@ var float oSwHi = na
 var float oSwLo = na
 oPh = ta.pivothigh(high, mtfLen, mtfLen)
 oPl = ta.pivotlow(low,  mtfLen, mtfLen)
-if not na(oPh)
+if not na(oPh) and cmeOpen[mtfLen]
     oSwHi := oPh
-if not na(oPl)
+if not na(oPl) and cmeOpen[mtfLen]
     oSwLo := oPl
 
 // side-aware structural risk, with a fall back to the flat figure
@@ -873,6 +823,11 @@ processPivot(int id, bool on, float ph, int pht, int phc, float pl, int plt, int
     if on and barstate.isconfirmed
         newHi = not na(pht) and (na(pht[1]) or pht != pht[1])
         newLo = not na(plt) and (na(plt[1]) or plt != plt[1])
+        // a swing printed while CME was shut is not on the futures chart
+        if onCmeClock and newHi and f_cmeShut(pht)
+            newHi := false
+        if onCmeClock and newLo and f_cmeShut(plt)
+            newLo := false
         if newHi
             hx = anchor(id, ph, true, pht, phc, tf)
             addLevel(ph, true, hx, tag)
@@ -888,7 +843,36 @@ processPivot(int id, bool on, float ph, int pht, int phc, float pl, int plt, int
 // ═════════════════════════════════════════════════════════════
 
 TZ = "America/New_York"
-newDay = ta.change(time("D")) != 0
+symNewDay = ta.change(time("D")) != 0
+newDay = onCmeClock ? cmeNewDay : symNewDay
+
+// on the CME clock, PDH / PDL are the previous CME day's extremes, read
+// from the candles CME printed, anchored at the candle that made them
+var float cdHi  = na
+var float cdLo  = na
+var int   cdHiT = na
+var int   cdLoT = na
+var float cpHi  = na
+var float cpLo  = na
+var int   cpHiT = na
+var int   cpLoT = na
+if barstate.isconfirmed and onCmeClock and cmeOpen
+    if newDay
+        cpHi  := cdHi
+        cpLo  := cdLo
+        cpHiT := cdHiT
+        cpLoT := cdLoT
+        cdHi  := high
+        cdLo  := low
+        cdHiT := time
+        cdLoT := time
+    else
+        if na(cdHi) or high > cdHi
+            cdHi  := high
+            cdHiT := time
+        if na(cdLo) or low < cdLo
+            cdLo  := low
+            cdLoT := time
 
 if barstate.isconfirmed and newDay and not barstate.isfirst
     if dailyReset
@@ -898,7 +882,11 @@ if barstate.isconfirmed and newDay and not barstate.isfirst
             clearTag(sNames.get(i))
         clearTag("PDH")
         clearTag("PDL")
-    if pdOn and not na(pdh)
+    if pdOn and onCmeClock
+        if not na(cpHi)
+            addLevel(cpHi, true, cpHiT, "PDH")
+            addLevel(cpLo, false, cpLoT, "PDL")
+    else if pdOn and not na(pdh)
         hx = anchor(5, pdh, true, pdOpn, pdCls, "D")
         lx = anchor(5, pdl, false, pdOpn, pdCls, "D")
         addLevel(pdh, true, hx, "PDH")
@@ -928,9 +916,9 @@ method runSession(Sess s, bool inside, bool st, bool ed, string tag) =>
         s.lx := na
     0
 
-in1 = s1On and not na(time(timeframe.period, s1Time, TZ))
-in2 = s2On and not na(time(timeframe.period, s2Time, TZ))
-in3 = s3On and not na(time(timeframe.period, s3Time, TZ))
+in1 = s1On and not na(time(timeframe.period, s1Time, TZ)) and cmeOpen
+in2 = s2On and not na(time(timeframe.period, s2Time, TZ)) and cmeOpen
+in3 = s3On and not na(time(timeframe.period, s3Time, TZ)) and cmeOpen
 
 if barstate.isconfirmed
     ses.get(0).runSession(in1, in1 and not in1[1], not in1 and in1[1], sNames.get(0))
@@ -954,7 +942,7 @@ poolLoTag := ""
 sweptHiMax := na
 sweptLoMin := na
 
-if barstate.isconfirmed
+if barstate.isconfirmed and cmeOpen
     int i = 0
     while i < live.size()
         x = live.get(i)
@@ -987,342 +975,9 @@ else if barstate.islast
         for k = 0 to live.size() - 1
             live.get(k).advance(xRight, visLim)
 
-// ═════════════════════════════════════════════════════════════
-// Ranging
-//
-// Candles building sideways and tight, printing relative equal highs and
-// relative equal lows. Read from the chart timeframe's own swings, never
-// from the register, so a consolidation shorter than one register candle
-// is still seen.
-//
-// The full count: rgMin swing highs at one level and rgMin swing lows at
-// one level, the whole box, wick to wick, inside the width cap. A level
-// is any swing in the outer third of the box; the swings within the equal
-// tolerance of it are its touches. Two touches count as two only when
-// price pulled back at least RG_PULL of the box between them. A spike past
-// the level may sit inside the box - support that keeps holding under a
-// stray wick - unless a displacement candle printed the spike. The level
-// has to be holding when the box confirms: the close must be back inside
-// the two equal levels, within the wick tolerance. Of every run of swings
-// that qualifies, the oldest start is taken.
-//
-// Steps: a confirmed box whose high and low both moved the same way from
-// the last confirmed box, that overlaps it, and with price never more
-// than the equal tolerance past the last box's far edge in between, is a
-// step in a trend. It is tracked so the next box can be compared with it,
-// but it is not drawn, does not alert and gates nothing; the last box is
-// taken off the chart as a step too.
-//
-// Two boxes, run side by side.
-//
-// Confirmed - the full count. While it is live, sweeps of pools strictly
-//   inside it reach no range engine. The register still marks them swept.
-//   The gate reads the box as it stood before this bar, so the bar that
-//   takes an edge passes through.
-//
-// Early - a warning, nothing more. It gates nothing. Shown only while no
-//   confirmed box is live, from one of two routes:
-//     after displacement: a run whose first candle comes within RG_DISP_W
-//       candles after a displacement candle, one touch short of the count
-//     tight bodies: the bodies of the last rgBodyN candles inside a band
-//       of rgBodyW x ATR, one touch short on each side
-//   Neither route may take a run that contains a displacement candle.
-//   It is replaced when the confirmed box appears, and withdrawn when
-//   price breaks it or rgWait candles pass. A withdrawn early box does
-//   not use up the swings: the confirmed search carries on as if it had
-//   never been drawn.
-//
-// Either box: a wick past an edge by no more than the wick tolerance is
-// another equal high or low and the box stretches to it. That tolerance
-// is its own input, tighter than the equal tolerance, and is measured
-// from the edge the box went live with, so pokes cannot walk it into a
-// breakout. A close beyond an edge, a wick past the original edge by more
-// than the wick tolerance, or a stretch that would breach the cap ends
-// the box on that side. It is drawn to the last candle inside it.
-// ═════════════════════════════════════════════════════════════
-
-var array<Swg> rgSw = array.new<Swg>()
-var array<box> rgBoxes = array.new<box>()   // confirmed boxes kept on the chart
-var array<box> rgGoneBx = array.new<box>()  // withdrawn early boxes, when shown
-var RgBox rgA = RgBox.new()                 // confirmed
-var RgBox rgB = RgBox.new()                 // early
-var int   rgBreakT = 0                      // last confirmed break
-var int   rgGoneT  = 0                      // last early withdrawal
-// the last confirmed box that ended, for the step rule
-var float rgLastHi    = na
-var float rgLastLo    = na
-var float rgLastAtr   = na
-var int   rgLastBrk   = na                  // bar_index of the candle that broke it
-var bool  rgLastDrawn = false               // it is the newest entry in rgBoxes
-bool rgBrokeHi   = false
-bool rgBrokeLo   = false
-bool rgFormed    = false
-bool rgWarned    = false
-bool rgWithdrawn = false
-
-passHi = poolHi and (not rgA.on or rgA.step or sweptHiMax >= rgA.hi - tol)
-passLo = poolLo and (not rgA.on or rgA.step or sweptLoMin <= rgA.lo + tol)
-
-// chart-timeframe swings. Equal neighbours yield one swing, the later bar:
-// strictly beyond the bars to its right, at or beyond the bars to its left.
-rgRH  = ta.highest(high, rgLen)
-rgRL  = ta.lowest(low, rgLen)
-rgCh  = high[rgLen]
-rgCl  = low[rgLen]
-rgSwT = time[rgLen]
-rgLH  = rgRH[rgLen + 1]
-rgLL  = rgRL[rgLen + 1]
-rgNewH = not na(rgLH) and rgCh > rgRH and rgCh >= rgLH
-rgNewL = not na(rgLL) and rgCl < rgRL and rgCl <= rgLL
-
-// a displacement candle: body against the ATR of the candle before it
-rgAtrP = atrVal[1]
-rgDisp = not na(rgAtrP) and math.abs(close - open) >= rgDispX * rgAtrP
-
-// tight bodies: the bodies of the last rgBodyN candles inside one narrow band
-rgBodyBand = ta.highest(math.max(open, close), rgBodyN) - ta.lowest(math.min(open, close), rgBodyN)
-rgTight    = rgBody and not na(rgBodyBand) and not na(atrVal) and rgBodyBand <= rgBodyW * atrVal
-
-rgBorder = switch rgSty
-    "Dashed" => line.style_dashed
-    "Dotted" => line.style_dotted
-    => line.style_solid
-rgBorderB = switch rgStyB
-    "Dashed" => line.style_dashed
-    "Solid"  => line.style_solid
-    => line.style_dotted
-
-// one closed candle against a live box. Returns which side, if any, ended it.
-method rgStep(RgBox b) =>
-    bool bH = close > b.hi or high > b.hi0 + b.tol
-    bool bL = close < b.lo or low < b.lo0 - b.tol
-    if not (bH or bL)
-        float nHi = math.max(b.hi, high)
-        float nLo = math.min(b.lo, low)
-        if nHi - nLo > b.cap
-            bH := high > b.hi
-            bL := low < b.lo
-        else
-            b.hi := nHi
-            b.lo := nLo
-    [bH, bL]
-
-// the oldest run of swings, formed after `since`, that qualifies.
-// kind: 0 full count, 1 early after displacement, 2 tight bodies.
-// The early kinds are only considered when allowEarly is set.
-f_rgFind(int since, bool allowEarly) =>
-    float cap  = rgAtrX * nz(atrVal, 0)
-    float tolv = rgEqX * nz(atrVal, 0)
-    float bMax = na
-    float bMin = na
-    float fHi  = na
-    float fLo  = na
-    int   fT   = na
-    int   fLB  = na      // bar_index of the run's first candle
-    int   fKind = 0
-    bool  hasD = false   // the run so far contains a displacement candle
-    bool  dMax = false   // the highest wick was printed by a displacement candle
-    bool  dMin = false
-    int   j    = 0
-    int   lim  = math.min(bar_index, MAX_SCAN - 1)
-    if rgSw.size() > 0 and cap > 0
-        // newest swing first. The envelope is every wick from the
-        // swing's own bar to this one, so price cannot have left it.
-        for k = 0 to rgSw.size() - 1
-            s = rgSw.get(k)
-            if s.t <= since or s.t < time[lim]
-                break
-            while j <= lim and time[j] >= s.t
-                if na(bMax) or high[j] > bMax
-                    bMax := high[j]
-                    dMax := rgDisp[j]
-                if na(bMin) or low[j] < bMin
-                    bMin := low[j]
-                    dMin := rgDisp[j]
-                if rgDisp[j]
-                    hasD := true
-                j += 1
-            if bMax - bMin > cap
-                break
-            // touches at the best level on each side. Every swing in the
-            // outer third is a candidate level; its touches are the swings
-            // within the equal tolerance of it, oldest first, each separated
-            // from the last by a pullback of sep. opp is the furthest swing
-            // the other way since the last counted touch.
-            float H3  = (bMax - bMin) / 3.0
-            float sep = RG_PULL * (bMax - bMin)
-            int   nh  = 0
-            int   nl  = 0
-            float hiLvl = na
-            float loLvl = na
-            for c0 = k to 0
-                cand = rgSw.get(c0)
-                bool inBand = cand.hi ? cand.p >= bMax - H3 : cand.p <= bMin + H3
-                if inBand
-                    int   n   = 0
-                    float opp = na
-                    for m = k to 0
-                        q = rgSw.get(m)
-                        if q.hi == cand.hi
-                            if math.abs(q.p - cand.p) <= tolv and (n == 0 or (not na(opp) and (cand.hi ? cand.p - opp : opp - cand.p) >= sep))
-                                n += 1
-                                opp := na
-                        else
-                            opp := na(opp) ? q.p : cand.hi ? math.min(opp, q.p) : math.max(opp, q.p)
-                    if n > (cand.hi ? nh : nl)
-                        // a spike past this level is fine, unless displacement printed it
-                        bool spiky = cand.hi ? bMax - cand.p > tolv : cand.p - bMin > tolv
-                        if not (spiky and (cand.hi ? dMax : dMin))
-                            if cand.hi
-                                nh := n
-                                hiLvl := cand.p
-                            else
-                                nl := n
-                                loLvl := cand.p
-            // j is now the number of candles in this run, and points at
-            // the candle just before its first one
-            // the full count, and the levels still holding on this close
-            float hold = rgPokeX * nz(atrVal, 0)
-            bool full  = nh >= rgMin and nl >= rgMin and close >= loLvl - hold and close <= hiLvl + hold
-            bool early = false
-            if allowEarly and rgEarly and not full and not hasD and nh + nl >= 2 * rgMin - 1 and math.min(nh, nl) >= rgMin - 1
-                for w = 0 to RG_DISP_W - 1
-                    if j + w <= lim
-                        if rgDisp[j + w]
-                            early := true
-                            break
-            bool tight = allowEarly and rgTight and not full and not early and not hasD and math.min(nh, nl) >= rgMin - 1 and j >= rgBodyN
-            if full or early or tight
-                fT  := s.t
-                fLB := bar_index - j + 1
-                fHi := bMax
-                fLo := bMin
-                fKind := full ? 0 : early ? 1 : 2
-    [fT, fHi, fLo, fKind, cap, fLB]
-
-if barstate.isconfirmed and rgOn
-    // the confirmed box
-    if rgA.on
-        [aH, aL] = rgA.rgStep()
-        if aH or aL
-            if not rgA.step
-                rgBrokeHi := aH
-                rgBrokeLo := aL
-            rgA.on := false
-            rgBreakT := time
-            rgLastHi    := rgA.hi
-            rgLastLo    := rgA.lo
-            rgLastAtr   := rgA.atr
-            rgLastBrk   := bar_index
-            rgLastDrawn := not rgA.step and not na(rgA.bx)
-        else if not na(rgA.bx)
-            box.set_right(rgA.bx, time)
-            box.set_top(rgA.bx, rgA.hi)
-            box.set_bottom(rgA.bx, rgA.lo)
-
-    // the early box: broken, or out of time
-    if rgB.on
-        [eH, eL] = rgB.rgStep()
-        if eH or eL or bar_index - rgB.born >= rgWait
-            rgB.on := false
-            rgGoneT := time
-            rgWithdrawn := true
-            if not na(rgB.bx)
-                if rgGone
-                    box.set_border_color(rgB.bx, color.new(rgColB, 70))
-                    box.set_text_color(rgB.bx, color.new(rgColB, 70))
-                    box.set_text(rgB.bx, "Withdrawn")
-                    rgGoneBx.push(rgB.bx)
-                    while rgGoneBx.size() > rgKeep
-                        box.delete(rgGoneBx.shift())
-                else
-                    box.delete(rgB.bx)
-                rgB.bx := na
-        else if not na(rgB.bx)
-            box.set_right(rgB.bx, time)
-            box.set_top(rgB.bx, rgB.hi)
-            box.set_bottom(rgB.bx, rgB.lo)
-
-    if rgNewH
-        rgSw.unshift(Swg.new(rgCh, true, rgSwT))
-    if rgNewL
-        rgSw.unshift(Swg.new(rgCl, false, rgSwT))
-    while rgSw.size() > 40
-        rgSw.pop()
-
-    // confirmed: looked for when a swing arrives, and only from swings
-    // formed after the last confirmed break, so a stop hunt cannot be
-    // absorbed into a widened box
-    if not rgA.on and (rgNewH or rgNewL)
-        [fT, fHi, fLo, fKind, fCap, fLB] = f_rgFind(rgBreakT, false)
-        if not na(fT)
-            // a step: both edges moved the same way from the last box, the
-            // two overlap, and price in between never went more than the
-            // equal tolerance past the last box's far edge
-            bool isStep = false
-            if not na(rgLastBrk)
-                bool up  = fHi > rgLastHi and fLo > rgLastLo
-                bool dn  = fHi < rgLastHi and fLo < rgLastLo
-                bool ovl = fLo <= rgLastHi and fHi >= rgLastLo
-                if (up or dn) and ovl
-                    float tq = rgEqX * rgLastAtr
-                    int   o0 = bar_index - math.max(fLB, rgLastBrk)
-                    int   o1 = math.min(bar_index - rgLastBrk, MAX_SCAN - 1)
-                    float ext = up ? low[o0] : high[o0]
-                    for z = o0 to o1
-                        ext := up ? math.min(ext, low[z]) : math.max(ext, high[z])
-                    isStep := up ? ext >= rgLastLo - tq : ext <= rgLastHi + tq
-            rgA.on   := true
-            rgA.hi   := fHi
-            rgA.lo   := fLo
-            rgA.hi0  := fHi
-            rgA.lo0  := fLo
-            rgA.l    := fT
-            rgA.born := bar_index
-            rgA.cap  := fCap
-            rgA.tol  := rgPokeX * nz(atrVal, 0)
-            rgA.kind := 0
-            rgA.step := isStep
-            rgA.atr  := nz(atrVal, 0)
-            rgA.bx   := na
-            if isStep
-                // the last box was a step as well: off the chart
-                if rgLastDrawn and rgBoxes.size() > 0
-                    box.delete(rgBoxes.pop())
-                rgLastDrawn := false
-            else
-                rgFormed := true
-            // the early box, if one is up, has done its job
-            if rgB.on
-                rgB.on := false
-                if not na(rgB.bx)
-                    box.delete(rgB.bx)
-                    rgB.bx := na
-            if rgShow and not isStep
-                rgA.bx := box.new(rgA.l, rgA.hi, time, rgA.lo, xloc = xloc.bar_time, border_color = rgCol, border_width = 1, border_style = rgBorder, bgcolor = color.new(rgCol, 100), text = "Ranging", text_color = rgCol, text_size = f_size(lblSize), text_halign = text.align_left, text_valign = text.align_top)
-                rgBoxes.push(rgA.bx)
-                while rgBoxes.size() > rgKeep
-                    box.delete(rgBoxes.shift())
-
-    // early: only while nothing is confirmed, and only from swings formed
-    // after the last confirmed break and the last withdrawal
-    if not rgA.on and not rgB.on and (rgEarly or rgBody) and (rgNewH or rgNewL or rgTight)
-        [gT, gHi, gLo, gKind, gCap, gLB] = f_rgFind(math.max(rgBreakT, rgGoneT), true)
-        if not na(gT) and gKind != 0
-            rgB.on   := true
-            rgB.hi   := gHi
-            rgB.lo   := gLo
-            rgB.hi0  := gHi
-            rgB.lo0  := gLo
-            rgB.l    := gT
-            rgB.born := bar_index
-            rgB.cap  := gCap
-            rgB.tol  := rgPokeX * nz(atrVal, 0)
-            rgB.kind := gKind
-            rgB.bx   := na
-            rgWarned := true
-            if rgShow
-                rgB.bx := box.new(rgB.l, rgB.hi, time, rgB.lo, xloc = xloc.bar_time, border_color = rgColB, border_width = 1, border_style = rgBorderB, bgcolor = color.new(rgColB, 100), text = gKind == 1 ? "Ranging (early)" : "Ranging (tight)", text_color = rgColB, text_size = f_size(lblSize), text_halign = text.align_left, text_valign = text.align_top)
+// every registered sweep reaches the range engines
+passHi = poolHi
+passLo = poolLo
 
 // ═════════════════════════════════════════════════════════════
 // Dealing range
@@ -1510,7 +1165,7 @@ var array<int>   ipLoT  = array.new<int>()
 var array<int>   ipLoB  = array.new<int>()
 var bool         ipPartial = false   // the oldest record began mid-day on the first loaded bar
 
-if barstate.isconfirmed and frameOn
+if barstate.isconfirmed and frameOn and cmeOpen
     if newDay or ipDayT.size() == 0
         if ipDayT.size() == 0 and not newDay
             ipPartial := true
@@ -1564,7 +1219,7 @@ var Dlv dlv = Dlv.new()
 var int    lastSweep = 0 // 1 buy-side, -1 sell-side, 2 both on one bar
 var string lastSweepTag = ""
 
-if barstate.isconfirmed
+if barstate.isconfirmed and cmeOpen
     if passHi and passLo
         lastSweep := 2
         lastSweepTag := ""
@@ -1649,10 +1304,10 @@ var bool wasLive = false
 firstLive = rangeLive and not wasLive
 wasLive := rangeLive
 
-rangeReframed    = barstate.isconfirmed and rangeLive and not firstLive and (isRot ? rot.reframed : isFrm ? frm.reframed : isDlv ? dlv.formed : false)
-boundaryExtended = barstate.isconfirmed and rangeLive and (isRot ? rot.extended : isFrm ? frm.extended : isDlv ? dlv.extended : false)
-dlvFormed        = barstate.isconfirmed and dlvLive and dlv.formed
-frmContracted    = barstate.isconfirmed and frmLive and frm.contracted
+rangeReframed    = barstate.isconfirmed and cmeOpen and rangeLive and not firstLive and (isRot ? rot.reframed : isFrm ? frm.reframed : isDlv ? dlv.formed : false)
+boundaryExtended = barstate.isconfirmed and cmeOpen and rangeLive and (isRot ? rot.extended : isFrm ? frm.extended : isDlv ? dlv.extended : false)
+dlvFormed        = barstate.isconfirmed and cmeOpen and dlvLive and dlv.formed
+frmContracted    = barstate.isconfirmed and cmeOpen and frmLive and frm.contracted
 
 wkEq = rangeLive ? (cHi + cLo) / 2 : float(na)
 
@@ -1895,9 +1550,8 @@ f_od(float p) =>
     str.length(od) > 0 ? "   " + od : ""
 
 riskTxt = not oddsOn ? "—" : oddsRisk == "Distance to last swing" ? fmt_tick(riskUp) + " ↑ / " + fmt_tick(riskDn) + " ↓" : fmt_tick(riskFlat)
-rgLive   = rgA.on and not rgA.step
-stState  = rangeLive ? "Framed" : rgLive ? "Ranging" : rgB.on ? "Ranging?" : primDev ? "Developing" : "None"
-stateTxt = (prim == "None" ? "" : primName + " · ") + stState + (rangeLive and rgLive ? ", ranging" : rangeLive and rgB.on ? ", ranging?" : "")
+stState  = rangeLive ? "Framed" : primDev ? "Developing" : "None"
+stateTxt = (prim == "None" ? "" : primName + " · ") + stState
 
 f_row(table tt, int r, string k, string v) =>
     table.cell(tt, 0, r, k, text_color = tblTxt, text_size = f_tsize(tblSize), text_halign = text.align_left)
@@ -1937,8 +1591,3 @@ alertcondition(poolHi,    "BSL swept",              "Buy-side liquidity swept")
 alertcondition(poolLo,    "SSL swept",              "Sell-side liquidity swept")
 alertcondition(dlvFormed, "Delivery range formed",  "A raid followed by a close through structure formed a delivery range")
 alertcondition(frmContracted, "IPDA Frame contracted", "Time event, not a liquidity event: an IPDA Frame boundary aged out of the lookback and moved to the extreme inside the window")
-alertcondition(rgWarned,    "Ranging early",        "Possible consolidation: an early ranging box has appeared. Not confirmed")
-alertcondition(rgFormed,    "Ranging confirmed",    "Price is ranging: relative equal highs and lows inside a tight box")
-alertcondition(rgWithdrawn, "Ranging withdrawn",    "The early ranging box was withdrawn: price broke it or it ran out of time")
-alertcondition(rgBrokeHi,   "Ranging broken - BSL", "Price closed above the confirmed ranging box or ran through its high")
-alertcondition(rgBrokeLo,   "Ranging broken - SSL", "Price closed below the confirmed ranging box or ran through its low")
