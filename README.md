@@ -38,6 +38,8 @@ If one candle takes both sides, the script does not guess which came first. It a
 
 **Primary range** picks which one the box, equilibrium, draw, odds, volume profile, table and alerts measure against. If the one you picked is not live, it falls back to one that is and says so in the table.
 
+**Manual range.** Sometimes I want the range I see, not the one liquidity framed. Pick "Manual" as the primary range and set two times, the same way as the Dated DR in Dealing Range Liquidity Reversal. Its high and low are the highest high and lowest low of the candles between them, anchored at the candles that made them. While the second time is still ahead it keeps growing; after that it is fixed, and price trading beyond it reads as above premium or below discount instead of moving it. Everything downstream measures against it. The automatic ranges keep running underneath and draw quieter, so switching back costs nothing. This breaks the rule the rest of the tool follows, that no range exists until liquidity frames one: it is your read, not the tool's.
+
 ## Settings
 
 | Group | What is in it |
@@ -46,7 +48,7 @@ If one candle takes both sides, the script does not guess which came first. It a
 | 2. Sessions | Three sessions with editable names and times, New York time. Asia 20:00–00:00 and London 02:00–05:00 on, New York 09:30–12:00 off |
 | 3. Daily levels | PDH / PDL from the completed daily bar. Daily reset. CME clock for perps |
 | 4. Register style | Line style, swept-level history, origin labels, hide levels beyond a distance, merge tolerance |
-| 5. Dealing range | The three ranges, primary selector, labels, colours, premium / discount box |
+| 5. Dealing range | The three ranges, primary selector with a manual range, labels, colours, premium / discount box |
 | 6. Delivery range | Toggle and style |
 | 7. Draw | Mark the draw |
 | 8. Odds | Risk from an ATR multiple, manual points or the last swing. Round-trip cost. How far out to price |

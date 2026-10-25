@@ -31,6 +31,11 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
+//   - Manual range. A fourth primary range, picked by time the way
+//     Dealing Range Liquidity Reversal's Dated DR is: its high and low are
+//     the highest high and lowest low between two times, anchored at the
+//     candles that made them. It does not move when price trades beyond
+//     it. The automatic ranges keep running and can be switched back to.
 //   - Value area. The range-anchored profile now marks VAH and VAL: the
 //     band around the POC holding 70% of the volume traded inside the
 //     range. Optional real volume at price from TradingView's footprint
@@ -210,7 +215,9 @@ gRange = "5. Dealing range"
 rotOn   = input.bool(true,  "Rotation range", group = gRange, tooltip = "The original engine. Any opposing registered purge re-anchors that side at the purging bar, so a retracement that takes internal liquidity re-anchors the range to that rotation.")
 frameOn = input.bool(false, "IPDA Frame", inline = "fr", group = gRange)
 ipdaLb  = input.int(20, "IPDA lookback (days)", options = [20, 40, 60], inline = "fr", group = gRange, tooltip = "IPDA Frame: external context, not a second dealing range. Framed the same way as Rotation, but once both sides are set only a purge of a pool at or beyond a boundary moves it, and a purge only widens it. Internal sweeps are repricing. It contracts on time: any boundary older than the lookback is re-anchored to that side's extreme inside the window, at the bar that printed it. The window is the current Daily bar plus the previous lookback-1, recalculated every day, so it agrees with the same count on a Daily chart. Until the chart holds a full window of Daily bars, no contraction happens and the frame is marked not ready with the days actually loaded - a 60D frame is never silently computed on fewer days.")
-primSel = input.string("Rotation", "Primary range", options = ["Rotation", "IPDA Frame", "Delivery"], group = gRange, tooltip = "The range the box, EQ, position, draw marker, boundary odds, volume profile, table and alerts all measure against. The primary draws solid with the labels below; any other range that is on draws quieter. If the chosen range is not live, it falls back to the first LIVE range in the order Rotation, IPDA Frame, Delivery, and the table marks the fallback.")
+primSel = input.string("Rotation", "Primary range", options = ["Rotation", "IPDA Frame", "Delivery", "Manual"], group = gRange, tooltip = "The range the box, EQ, position, draw marker, boundary odds, volume profile, table and alerts all measure against. The primary draws solid with the labels below; any other range that is on draws quieter. If the chosen range is not live, it falls back to the first LIVE range in the order Rotation, IPDA Frame, Delivery, and the table marks the fallback. Manual is your own range, set by the two times below.")
+manFrom = input.time(timestamp("2026-10-19T18:00:00-04:00"), "Manual range from", inline = "mr", group = gRange, active = primSel == "Manual", tooltip = "Manual range: its high and low are the highest high and lowest low of the candles that open from the first time up to, not including, the second, anchored at the candles that made them. The pickers follow TradingView's date convention, which may not be New York time: after setting them, check the range lines start on the candles you meant. While the second time is still ahead the range keeps growing; after it, the range is fixed and does not move when price trades beyond it. On the CME clock, candles while CME is shut are skipped. A start older than the loaded history begins at the first loaded candle.")
+manTo   = input.time(timestamp("2026-10-20T17:00:00-04:00"), "to", inline = "mr", group = gRange, active = primSel == "Manual")
 showHi = input.bool(true, "Range high", inline = "rh", group = gRange)
 colHi  = input.color(#2962FF, "", inline = "rh", group = gRange)
 txtHi  = input.string("DR HIGH", "", inline = "rh", group = gRange)
@@ -1278,6 +1285,28 @@ if barstate.isconfirmed and cmeOpen
     if dlvOn
         dlv.step(passHi, passLo, oSwLo, oSwHi)
 
+// ── manual range ─────────────────────────────────────────────
+// the extremes of the candles that open inside [manFrom, manTo),
+// anchored at the candles that printed them. Nothing moves it after.
+
+var float mHi  = na
+var float mLo  = na
+var int   mHiT = na
+var int   mLoT = na
+var int   mHiB = na
+var int   mLoB = na
+manOn = primSel == "Manual"
+if manOn and barstate.isconfirmed and cmeOpen and time >= manFrom and time < manTo
+    if na(mHi) or high > mHi
+        mHi  := high
+        mHiT := time
+        mHiB := bar_index
+    if na(mLo) or low < mLo
+        mLo  := low
+        mLoT := time
+        mLoB := bar_index
+manLive = manOn and not na(mHi) and not na(mLo) and mHi > mLo
+
 // ── primary range ────────────────────────────────────────────
 // the box, EQ, position, draw, boundary odds, volume profile, table
 // and alerts all measure against this one
@@ -1288,28 +1317,29 @@ dlvLive = dlvOn and dlv.dir != 0 and not na(dlv.hi) and not na(dlv.lo) and dlv.h
 
 // the chosen range if it is live, else the first live range, else the
 // chosen one if switched on (so the table can show it developing)
-reqLive = primSel == "Rotation" ? rotLive : primSel == "IPDA Frame" ? frmLive : dlvLive
-reqOn   = primSel == "Rotation" ? rotOn : primSel == "IPDA Frame" ? frameOn : dlvOn
+reqLive = primSel == "Rotation" ? rotLive : primSel == "IPDA Frame" ? frmLive : primSel == "Delivery" ? dlvLive : manLive
+reqOn   = primSel == "Rotation" ? rotOn : primSel == "IPDA Frame" ? frameOn : primSel == "Delivery" ? dlvOn : manOn
 prim    = reqLive ? primSel : rotLive ? "Rotation" : frmLive ? "IPDA Frame" : dlvLive ? "Delivery" : reqOn ? primSel : rotOn ? "Rotation" : frameOn ? "IPDA Frame" : dlvOn ? "Delivery" : "None"
 frmName  = "IPDA Frame " + str.tostring(ipdaLb) + "D" + (ipdaReady ? "" : " (not ready, " + str.tostring(ipDays) + "D loaded)")
 primName = (prim == "IPDA Frame" ? frmName : prim) + (prim != primSel and prim != "None" ? " (fallback)" : "")
 isRot = prim == "Rotation"
 isFrm = prim == "IPDA Frame"
 isDlv = prim == "Delivery"
+isMan = prim == "Manual"
 
-cHi  = isRot ? rot.hi  : isFrm ? frm.hi  : isDlv ? dlv.hi  : float(na)
-cLo  = isRot ? rot.lo  : isFrm ? frm.lo  : isDlv ? dlv.lo  : float(na)
-cHiT = isRot ? rot.hiT : isFrm ? frm.hiT : isDlv ? dlv.hiT : int(na)
-cLoT = isRot ? rot.loT : isFrm ? frm.loT : isDlv ? dlv.loT : int(na)
-cHiB = isRot ? rot.hiB : isFrm ? frm.hiB : isDlv ? dlv.hiB : int(na)
-cLoB = isRot ? rot.loB : isFrm ? frm.loB : isDlv ? dlv.loB : int(na)
+cHi  = isRot ? rot.hi  : isFrm ? frm.hi  : isDlv ? dlv.hi  : isMan ? mHi  : float(na)
+cLo  = isRot ? rot.lo  : isFrm ? frm.lo  : isDlv ? dlv.lo  : isMan ? mLo  : float(na)
+cHiT = isRot ? rot.hiT : isFrm ? frm.hiT : isDlv ? dlv.hiT : isMan ? mHiT : int(na)
+cLoT = isRot ? rot.loT : isFrm ? frm.loT : isDlv ? dlv.loT : isMan ? mLoT : int(na)
+cHiB = isRot ? rot.hiB : isFrm ? frm.hiB : isDlv ? dlv.hiB : isMan ? mHiB : int(na)
+cLoB = isRot ? rot.loB : isFrm ? frm.loB : isDlv ? dlv.loB : isMan ? mLoB : int(na)
 
 // a bearish delivery follows a buy-side raid, so it reads as tracking the high
 primSt  = isRot ? rot.st : isFrm ? frm.st : isDlv ? -dlv.dir : 0
 primAmb = isRot ? rot.amb : isFrm ? frm.amb : false
-primDev = isRot ? (rot.hiSet or rot.loSet) : isFrm ? (frm.hiSet or frm.loSet) : isDlv ? (dlv.pend != 0) : false
+primDev = isRot ? (rot.hiSet or rot.loSet) : isFrm ? (frm.hiSet or frm.loSet) : isDlv ? (dlv.pend != 0) : isMan ? not na(mHi) : false
 
-rangeLive = (isRot ? rotLive : isFrm ? frmLive : isDlv ? dlvLive : false) and not na(cHi) and not na(cLo) and cHi > cLo
+rangeLive = (isRot ? rotLive : isFrm ? frmLive : isDlv ? dlvLive : isMan ? manLive : false) and not na(cHi) and not na(cLo) and cHi > cLo
 
 var bool wasLive = false
 firstLive = rangeLive and not wasLive
