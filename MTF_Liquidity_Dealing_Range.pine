@@ -229,16 +229,15 @@ txtLo  = input.string("DR LOW", "", inline = "rl", group = gRange)
 widLo  = input.int(1, "", minval = 1, maxval = 4, inline = "rl", group = gRange)
 
 showEq = input.bool(true, "Equilibrium", inline = "eq", group = gRange)
-colEq  = input.color(#787B86, "", inline = "eq", group = gRange)
+colEq  = input.color(#E0A800, "", inline = "eq", group = gRange)
 txtEq  = input.string("DR EQ", "", inline = "eq", group = gRange)
 widEq  = input.int(1, "", minval = 1, maxval = 4, inline = "eq", group = gRange)
 showPrice  = input.bool(true, "Show price on labels", group = gRange)
 extendBars = input.int(12, "Extend right (bars)", minval = 1, maxval = 200, group = gRange)
 edgeTrigger = input.bool(false, "Boundary violation counts as a purge", group = gRange, tooltip = "Off: only a registered liquidity sweep transitions the range, which is the faithful reading. On: price trading through a boundary also transitions it, which stops a stale boundary being drawn through price when no pool sits there.")
-boxOn   = input.bool(true, "Premium / discount box", group = gRange, tooltip = "Drawn over the primary range and split at 0.5 only: 1 at the high, 0 at the low. Its midline replaces the EQ stroke; the EQ label and its odds stay. PREMIUM and DISCOUNT text takes each half's colour at full strength.")
+boxOn   = input.bool(true, "Premium / discount box", group = gRange, tooltip = "Drawn over the primary range and split at 0.5 only: 1 at the high, 0 at the low. Its midline replaces the EQ stroke and takes the Equilibrium colour and width; the EQ label and its odds stay. PREMIUM and DISCOUNT text takes each half's colour at full strength.")
 colPrem = input.color(color.new(#787B86, 88), "Premium", inline = "bx", group = gRange)
 colDisc = input.color(color.new(#C9A227, 90), "Discount", inline = "bx", group = gRange)
-colMid  = input.color(#E0A800, "Midline", inline = "bx", group = gRange)
 
 gRef = "6. Delivery range"
 dlvOn  = input.bool(false, "Delivery range", inline = "rf", group = gRef)
@@ -1439,7 +1438,7 @@ if barstate.islast
             lbLo := label.new(xRight, cLo, f_label2(txtLo, cLo), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(colLo, 100), textcolor = colLo, size = f_size(lblSize))
         if showEq
             // with the box on, its gold midline is the EQ stroke; the label stays
-            cEq = boxOn ? colMid : colEq
+            cEq = colEq
             if not boxOn
                 eqStart = math.max(cHiT, cLoT)
                 lnEq := line.new(eqStart, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colEq, width = widEq, style = line.style_dashed)
@@ -1452,9 +1451,9 @@ if barstate.islast
             cNone = color.new(color.black, 100)
             exBoxes.push(box.new(bxL, cHi, xRight, wkEq, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colPrem, text = "PREMIUM", text_color = cPm, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_top))
             exBoxes.push(box.new(bxL, wkEq, xRight, cLo, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colDisc, text = "DISCOUNT", text_color = cDs, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_bottom))
-            exLines.push(line.new(bxL, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colMid, width = 1, style = line.style_solid))
+            exLines.push(line.new(bxL, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colEq, width = widEq, style = line.style_solid))
             exLabels.push(label.new(bxL, cHi,  "1",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cPm,    size = f_size(lblSize)))
-            exLabels.push(label.new(bxL, wkEq, "0.5", xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = colMid, size = f_size(lblSize)))
+            exLabels.push(label.new(bxL, wkEq, "0.5", xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = colEq, size = f_size(lblSize)))
             exLabels.push(label.new(bxL, cLo,  "0",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cDs,    size = f_size(lblSize)))
         // no fallback: a range boundary is not automatically an unswept objective
         if showDraw and drawSide != 0 and not na(drawLvl)
