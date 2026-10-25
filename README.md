@@ -18,7 +18,7 @@ It tells you where price sits inside a range that liquidity has defined. It does
 
 **Odds.** Every live level is priced as the chance of reaching it before a 1R stop with no edge at all. It is the number your read has to beat, not a forecast.
 
-**Volume context.** Optional. A volume profile and point of control anchored to the range.
+**Volume context.** Optional. A volume profile, point of control and value area anchored to the range. VAH and VAL bound the band around the POC that holds 70% of the volume traded inside the range: where the market accepted price, and where it didn't. By default each candle's volume is spread evenly from its high to its low. With "Real volume at price" on, it is placed at the prices it actually traded, from TradingView's footprint data. That needs Premium or Ultimate, so it is off by default; on a lower plan the script stops with an error until you switch it off. Candles with no footprint data fall back to the even spread, and the POC label's tooltip says how many used real data. On the CME clock, candles printed while CME was shut add no volume.
 
 ## Reading it
 
@@ -50,7 +50,7 @@ If one candle takes both sides, the script does not guess which came first. It a
 | 6. Delivery range | Toggle and style |
 | 7. Draw | Mark the draw |
 | 8. Odds | Risk from an ATR multiple, manual points or the last swing. Round-trip cost. How far out to price |
-| 9. Volume context | POC line, profile, row height, lookback |
+| 9. Volume context | POC line, value area, real volume at price (Premium), profile, row height, lookback |
 | 10. Table | Position and size |
 
 Only sources at or above the chart timeframe are used. On a 1H chart that is 1H, 4H and Daily. On a 4H chart, 4H and Daily. A source finer than the chart is skipped, not approximated.
@@ -67,7 +67,7 @@ It is on by default ("Hold perpetual futures to the CME clock" in group 3), with
 
 ## Table
 
-Range state, range high and low, delivery, equilibrium, position, last sweep, draw, risk (1R), and POC when volume context is on. Off by default.
+Range state, range high and low, delivery, equilibrium, position, last sweep, draw, risk (1R), and POC and value area when volume context is on. Off by default.
 
 ## Alerts
 
@@ -102,7 +102,7 @@ If a slow chart hits calculation limits with volume context on, lower "Max lookb
 
 The dealing-range model and the 20 / 40 / 60 day IPDA data ranges are ICT's, from the 2022 Mentorship.
 
-The register layout (five timeframe slots, sessions, merged tags) was modelled on the LQ MTF liquidity indicator. Wick-exact anchoring, per-tag trimming and drawing-object reuse came from studying Zeiierman's MTF Liquidity Stack. The volume profile's ATR binning follows BigBeluga's Structural Liquidity & POC Matrix. The odds layer follows the first-passage pricing in The Distilled Odds. The delivery range came out of @Ed_tradess's notes on selecting the range from the actual delivery.
+The register layout (five timeframe slots, sessions, merged tags) was modelled on the LQ MTF liquidity indicator. Wick-exact anchoring, per-tag trimming and drawing-object reuse came from studying Zeiierman's MTF Liquidity Stack. The volume profile's ATR binning follows BigBeluga's Structural Liquidity & POC Matrix. The footprint request follows ata_sabanci's Volume Footprint (MPL-2.0). The odds layer follows the first-passage pricing in The Distilled Odds. The delivery range came out of @Ed_tradess's notes on selecting the range from the actual delivery.
 
 ## Licence
 

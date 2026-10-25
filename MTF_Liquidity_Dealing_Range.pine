@@ -31,6 +31,12 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
+//   - Value area. The range-anchored profile now marks VAH and VAL: the
+//     band around the POC holding 70% of the volume traded inside the
+//     range. Optional real volume at price from TradingView's footprint
+//     (Premium and up), off by default; bars without footprint data fall
+//     back to the even spread. Footprint request pattern after ata_sabanci's
+//     Volume Footprint (MPL-2.0).
 //   - CME clock. A perpetual that mirrors a CME market (trade.xyz,
 //     Binance CL) is read as the futures contract would print it on an
 //     intraday chart: candles from Friday 17:00 to Sunday 18:00 New York
@@ -248,10 +254,15 @@ oddsDim   = input.bool(true, "Dim below one-in-three", inline = "od", group = gO
 oddsFade  = input.int(25, "", minval = 0, maxval = 90, inline = "od", group = gOdds)
 
 gVc = "9. Volume context"
-vcOn       = input.bool(false, "Enable volume context", group = gVc, tooltip = "A volume profile and point of control anchored to the live dealing range. Nothing is computed or drawn until a range exists, and the whole thing recomputes when the range reframes. Not an ICT construct - treat it as context, not a signal.")
+vcOn       = input.bool(false, "Enable volume context", group = gVc, tooltip = "A volume profile, point of control and value area anchored to the live dealing range. Nothing is computed or drawn until a range exists, and the whole thing recomputes when the range reframes. Not an ICT construct - treat it as context, not a signal.")
 vcPocShow  = input.bool(true, "POC line", inline = "vp", group = gVc, tooltip = "The single highest-volume row in the range. Drawn from the older of the two boundary anchors and extended right with the range lines.")
 vcPocCol   = input.color(#E8A33D, "", inline = "vp", group = gVc)
 vcPocWid   = input.int(2, "", minval = 1, maxval = 4, inline = "vp", group = gVc)
+vcVaShow   = input.bool(true, "Value area", inline = "va", group = gVc, tooltip = "VAH and VAL: the band around the POC that holds this share of the volume traded inside the range, built by adding the heavier neighbouring row, above or below, until the share is reached. Inside it the market accepted price; beyond it trade thinned out. Seventy is the classical figure.")
+vcVaCol    = input.color(color.new(#E8A33D, 40), "", inline = "va", group = gVc)
+vcVaPct    = input.int(70, "%", minval = 50, maxval = 95, inline = "va", group = gVc)
+vcFpOn     = input.bool(false, "Real volume at price", inline = "fp", group = gVc, tooltip = "Needs TradingView Premium or Ultimate. On: each candle's volume is placed at the prices it actually traded, from TradingView's footprint data, instead of being spread evenly across the candle's high to low. On a lower plan the script stops with an error while this is on - switch it off. Candles with no footprint data, such as history beyond what the plan provides, fall back to the even spread; the POC label's tooltip says how many candles used real data. Ticks per row sets the footprint's own row size: smaller is finer and slower.")
+vcFpTicks  = input.int(4, "ticks per row", minval = 1, maxval = 100, inline = "fp", group = gVc)
 vcProfShow  = input.bool(false, "Volume profile", inline = "vf", group = gVc, tooltip = "The full histogram. It is anchored outside the primary range / premium-discount box instead of against the last candle. Off by default - the POC line carries most of the information.")
 vcProfCol   = input.color(color.new(#424351, 50), "", inline = "vf", group = gVc)
 vcProfFill  = input.int(88, "", minval = 0, maxval = 100, inline = "vf", group = gVc)
@@ -1436,21 +1447,44 @@ if barstate.islast
 // the range, which is the only thing the range can speak to.
 
 var float    vcPoc   = na
+var float    vcVah   = na
+var float    vcVal   = na
 var bool     vcValid = false
 var polyline vcPoly  = na
 var line     vcLine  = na
 var label    vcLbl   = na
+var line     vcVahLn = na
+var line     vcValLn = na
+var label    vcVahLb = na
+var label    vcValLb = na
 
 vcAtr = ta.atr(vcAtrLen)
+
+// Real volume at price. The request sits behind a real conditional, so
+// with the option off it never runs and lower plans never hit the
+// footprint plan check.
+footprint vcFp = na
+if vcOn and vcFpOn
+    vcFp := request.footprint(ticks_per_row = vcFpTicks, va_percent = vcVaPct, imbalance_percent = 300)
 
 if barstate.islast
     polyline.delete(vcPoly)
     line.delete(vcLine)
     label.delete(vcLbl)
+    line.delete(vcVahLn)
+    line.delete(vcValLn)
+    label.delete(vcVahLb)
+    label.delete(vcValLb)
     vcPoly  := na
     vcLine  := na
     vcLbl   := na
+    vcVahLn := na
+    vcValLn := na
+    vcVahLb := na
+    vcValLb := na
     vcPoc   := na
+    vcVah   := na
+    vcVal   := na
     vcValid := false
 
     if vcOn and rangeLive and not na(vcAtr) and vcAtr > 0 and not na(cHiB) and not na(cLoB)
@@ -1471,14 +1505,36 @@ if barstate.islast
             int vStart  = math.min(math.max(vAnchor, bar_index - vcMaxLook), bar_index)
 
             bins = array.new<float>(vRows, 0.0)
+            int vBars  = 0   // candles in the profile
+            int vFpBar = 0   // of which placed from footprint data
 
             for i = vStart to bar_index
                 int   off = bar_index - i
                 float bh  = high[off]
                 float bl  = low[off]
                 float bv  = volume[off]
-
+                // on the CME clock, candles printed while CME was shut
+                // carry no volume into the profile
+                if onCmeClock and not cmeOpen[off]
+                    bv := na
+                footprint fb = na
+                if vcFpOn and not na(bv)
+                    fb := vcFp[off]
                 if not na(bh) and not na(bl) and not na(bv) and bv > 0
+                    vBars += 1
+
+                if not na(fb)
+                    // each footprint row's volume goes to the profile row
+                    // holding its midpoint; rows outside the range are not
+                    // credited, as with the even spread
+                    vFpBar += 1
+                    for rw in fb.rows()
+                        float rm = (rw.up_price() + rw.down_price()) / 2
+                        float rv = rw.buy_volume() + rw.sell_volume()
+                        if rm >= vBot and rm <= vTop and rv > 0
+                            int ix = math.max(0, math.min(vRows - 1, int(math.floor((rm - vBot) / vBin))))
+                            array.set(bins, ix, array.get(bins, ix) + rv)
+                else if not na(bh) and not na(bl) and not na(bv) and bv > 0
                     float ch = math.min(bh, vTop)
                     float cl = math.max(bl, vBot)
 
@@ -1505,10 +1561,36 @@ if barstate.islast
                 vcPoc   := vBot + pocIdx * vBin + vBin / 2
                 vcValid := true
 
+                // value area: grow from the POC row, each step taking the
+                // heavier neighbouring row, until it holds vcVaPct of the
+                // volume traded inside the range
+                float vSum = array.sum(bins)
+                int   vaLo = pocIdx
+                int   vaHi = pocIdx
+                float vaV  = vMax
+                while vaV < vSum * vcVaPct / 100.0 and (vaLo > 0 or vaHi < vRows - 1)
+                    float vaUp = vaHi < vRows - 1 ? array.get(bins, vaHi + 1) : -1.0
+                    float vaDn = vaLo > 0 ? array.get(bins, vaLo - 1) : -1.0
+                    if vaUp >= vaDn
+                        vaHi += 1
+                        vaV  += vaUp
+                    else
+                        vaLo -= 1
+                        vaV  += vaDn
+                vcVah := vBot + (vaHi + 1) * vBin
+                vcVal := vBot + vaLo * vBin
+
+                int vX1 = math.min(cHiT, cLoT)
                 if vcPocShow
-                    int vX1 = math.min(cHiT, cLoT)
+                    string vSrc = not vcFpOn ? "Volume spread evenly across each candle's range." : "Real volume at price on " + str.tostring(vFpBar) + " of " + str.tostring(vBars) + " candles; the rest spread evenly."
                     vcLine := line.new(vX1, vcPoc, xRight, vcPoc, xloc = xloc.bar_time, color = vcPocCol, width = vcPocWid, style = line.style_solid)
-                    vcLbl  := label.new(xRight, vcPoc, f_label2("POC", vcPoc), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcPocCol, 100), textcolor = vcPocCol, size = f_size(lblSize))
+                    vcLbl  := label.new(xRight, vcPoc, f_label2("POC", vcPoc), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcPocCol, 100), textcolor = vcPocCol, size = f_size(lblSize), tooltip = vSrc)
+
+                if vcVaShow
+                    vcVahLn := line.new(vX1, vcVah, xRight, vcVah, xloc = xloc.bar_time, color = vcVaCol, width = 1, style = line.style_dashed)
+                    vcValLn := line.new(vX1, vcVal, xRight, vcVal, xloc = xloc.bar_time, color = vcVaCol, width = 1, style = line.style_dashed)
+                    vcVahLb := label.new(xRight, vcVah, f_label2("VAH", vcVah), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcVaCol, 100), textcolor = vcVaCol, size = f_size(lblSize))
+                    vcValLb := label.new(xRight, vcVal, f_label2("VAL", vcVal), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcVaCol, 100), textcolor = vcVaCol, size = f_size(lblSize))
 
                 if vcProfShow
                     // Permanent placement model:
@@ -1560,7 +1642,7 @@ f_row(table tt, int r, string k, string v) =>
 var table t = na
 if tblOn and barstate.islast
     table.delete(t)
-    t := table.new(f_pos(tblPos), 2, vcOn ? 10 : 9, bgcolor = tblBg, border_color = tblBorder, border_width = 1, frame_color = tblBorder, frame_width = 1)
+    t := table.new(f_pos(tblPos), 2, vcOn ? (vcVaShow ? 11 : 10) : 9, bgcolor = tblBg, border_color = tblBorder, border_width = 1, frame_color = tblBorder, frame_width = 1)
     f_row(t, 0, "Range",      stateTxt)
     f_row(t, 1, "Range high", rangeLive ? fmt_tick(cHi) + f_od(cHi) : "—")
     f_row(t, 2, "Range low",  rangeLive ? fmt_tick(cLo) + f_od(cLo) : "—")
@@ -1572,6 +1654,8 @@ if tblOn and barstate.islast
     f_row(t, 8, "Risk (1R)",  riskTxt)
     if vcOn
         f_row(t, 9, "POC", vcValid ? fmt_tick(vcPoc) + f_od(vcPoc) : "—")
+        if vcVaShow
+            f_row(t, 10, "Value area", vcValid ? fmt_tick(vcVah) + " / " + fmt_tick(vcVal) : "—")
 
 // ═════════════════════════════════════════════════════════════
 // Alerts
