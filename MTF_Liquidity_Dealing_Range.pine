@@ -216,7 +216,7 @@ rotOn   = input.bool(true,  "Rotation range", group = gRange, tooltip = "The ori
 frameOn = input.bool(false, "IPDA Frame", inline = "fr", group = gRange)
 ipdaLb  = input.int(20, "IPDA lookback (days)", options = [20, 40, 60], inline = "fr", group = gRange, tooltip = "IPDA Frame: external context, not a second dealing range. Framed the same way as Rotation, but once both sides are set only a purge of a pool at or beyond a boundary moves it, and a purge only widens it. Internal sweeps are repricing. It contracts on time: any boundary older than the lookback is re-anchored to that side's extreme inside the window, at the bar that printed it. The window is the current Daily bar plus the previous lookback-1, recalculated every day, so it agrees with the same count on a Daily chart. Until the chart holds a full window of Daily bars, no contraction happens and the frame is marked not ready with the days actually loaded - a 60D frame is never silently computed on fewer days.")
 primSel = input.string("Rotation", "Primary range", options = ["Rotation", "IPDA Frame", "Delivery", "Manual"], group = gRange, tooltip = "The range the box, EQ, position, draw marker, boundary odds, volume profile, table and alerts all measure against. The primary draws solid with the labels below; any other range that is on draws quieter. If the chosen range is not live, it falls back to the first LIVE range in the order Rotation, IPDA Frame, Delivery, and the table marks the fallback. Manual is your own range, set by the two times below.")
-manFrom = input.time(timestamp("2026-10-19T18:00:00-04:00"), "Manual from", group = gRange, active = primSel == "Manual", tooltip = "Manual range: its high and low are the highest high and lowest low of the candles that open from the first time up to, not including, the second, anchored at the candles that made them. The pickers follow TradingView's date convention, which may not be New York time: after setting them, check the range lines start on the candles you meant. While the second time is still ahead the range keeps growing; after it, the range is fixed and does not move when price trades beyond it. On the CME clock, candles while CME is shut are skipped. A start older than the loaded history begins at the first loaded candle.")
+manFrom = input.time(timestamp("2026-10-19T18:00:00-04:00"), "Manual from", group = gRange, active = primSel == "Manual", tooltip = "Manual range: its high and low are the highest high and lowest low from the candle holding the first time through the candle holding the second, both included, anchored at the candles that made them. Pick the low's candle and the high's candle and both are in. The pickers follow TradingView's date convention, which may not be New York time: after setting them, check the range lines start on the candles you meant. While the second time is still ahead the range keeps growing; after it, the range is fixed and does not move when price trades beyond it. On the CME clock, candles while CME is shut are skipped. A start older than the loaded history begins at the first loaded candle.")
 manTo   = input.time(timestamp("2026-10-20T17:00:00-04:00"), "Manual to", group = gRange, active = primSel == "Manual")
 showHi = input.bool(true, "Range high", inline = "rh", group = gRange)
 colHi  = input.color(#2962FF, "", inline = "rh", group = gRange)
@@ -1286,8 +1286,9 @@ if barstate.isconfirmed and cmeOpen
         dlv.step(passHi, passLo, oSwLo, oSwHi)
 
 // ── manual range ─────────────────────────────────────────────
-// the extremes of the candles that open inside [manFrom, manTo),
-// anchored at the candles that printed them. Nothing moves it after.
+// the extremes from the candle holding manFrom through the candle holding
+// manTo, both included, anchored at the candles that printed them. On any
+// timeframe the candle a time falls in counts. Nothing moves it after.
 
 var float mHi  = na
 var float mLo  = na
@@ -1296,7 +1297,7 @@ var int   mLoT = na
 var int   mHiB = na
 var int   mLoB = na
 manOn = primSel == "Manual"
-if manOn and barstate.isconfirmed and cmeOpen and time >= manFrom and time < manTo
+if manOn and barstate.isconfirmed and cmeOpen and time_close > manFrom and time <= manTo
     if na(mHi) or high > mHi
         mHi  := high
         mHiT := time
@@ -1388,11 +1389,17 @@ var array<line>  exLines  = array.new<line>()
 var array<label> exLabels = array.new<label>()
 var array<box>   exBoxes  = array.new<box>()
 
+// a label on the same row as a primary range label drops one row below it
+f_lblStyle(float p) =>
+    float d = rangeLive ? math.max(tol, 0.015 * (cHi - cLo)) : tol
+    bool clash = rangeLive and (math.abs(p - cHi) <= d or math.abs(p - cLo) <= d or (showEq and math.abs(p - wkEq) <= d))
+    clash ? label.style_label_upper_left : label.style_label_left
+
 f_other(float h, float l, int hT, int lT, string name, color cH, color cL, int w, string sty, bool mid) =>
     exLines.push(line.new(hT, h, xRight, h, xloc = xloc.bar_time, color = cH, width = w, style = sty))
     exLines.push(line.new(lT, l, xRight, l, xloc = xloc.bar_time, color = cL, width = w, style = sty))
-    exLabels.push(label.new(xRight, h, f_label(name + " HIGH", h), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(cH, 100), textcolor = cH, size = f_size(lblSize)))
-    exLabels.push(label.new(xRight, l, f_label(name + " LOW", l), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(cL, 100), textcolor = cL, size = f_size(lblSize)))
+    exLabels.push(label.new(xRight, h, f_label(name + " HIGH", h), xloc = xloc.bar_time, style = f_lblStyle(h), color = color.new(cH, 100), textcolor = cH, size = f_size(lblSize)))
+    exLabels.push(label.new(xRight, l, f_label(name + " LOW", l), xloc = xloc.bar_time, style = f_lblStyle(l), color = color.new(cL, 100), textcolor = cL, size = f_size(lblSize)))
     if mid
         m = (h + l) / 2
         exLines.push(line.new(math.max(hT, lT), m, xRight, m, xloc = xloc.bar_time, color = cH, width = 1, style = line.style_dotted))
