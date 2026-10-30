@@ -31,6 +31,23 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
+//   - Relative equal highs and lows. A level counts the distinct candles
+//     that printed it. When two or more different candles sit within the
+//     merge tolerance, its tag reads REH or REL with the count, e.g.
+//     "1h,4h REH×2". The same wick reported by several sources counts
+//     once, so it cannot fake an equal.
+//   - "Hold perpetual futures to the CME clock" renamed "CME hours only".
+//   - Manual range. A fourth primary range, picked by time the way
+//     Dealing Range Liquidity Reversal's Dated DR is: its high and low are
+//     the highest high and lowest low between two times, anchored at the
+//     candles that made them. It does not move when price trades beyond
+//     it. The automatic ranges keep running and can be switched back to.
+//   - Value area. The range-anchored profile now marks VAH and VAL: the
+//     band around the POC holding 70% of the volume traded inside the
+//     range. Optional real volume at price from TradingView's footprint
+//     (Premium and up), off by default; bars without footprint data fall
+//     back to the even spread. Footprint request pattern after ata_sabanci's
+//     Volume Footprint (MPL-2.0).
 //   - CME clock. A perpetual that mirrors a CME market (trade.xyz,
 //     Binance CL) is read as the futures contract would print it on an
 //     intraday chart: candles from Friday 17:00 to Sunday 18:00 New York
@@ -91,6 +108,8 @@ type Level
     line   ln
     label  lb
     label  tx
+    array<int>    oT   // origin time of every source that printed this level
+    array<string> oG   // the tag each of those sources carries
 
 type Sess
     float h
@@ -184,7 +203,7 @@ gDay = "3. Daily levels"
 pdOn       = input.bool(true,  "PDH / PDL", inline = "d", group = gDay, tooltip = "Taken from the symbol's completed Daily bar, so it agrees with what a Daily chart shows. On the CME clock, taken from the previous CME day, 18:00 to 17:00 New York.")
 pdCol      = input.color(color.new(#424351, 50), "", inline = "d", group = gDay)
 dailyReset = input.bool(false, "Daily reset", group = gDay, tooltip = "Clear every level when the Daily bar rolls. Off clears only session and PDH/PDL levels.")
-cmeClockOn = input.bool(true, "Hold perpetual futures to the CME clock", group = gDay, tooltip = "Applies only to perpetual futures that mirror a CME market (every trade.xyz / HIP3XYZ market, BINANCE:CLUSDT.P), and only on intraday charts. On: candles from Friday 17:00 to Sunday 18:00 New York and in the daily 17:00-18:00 halt are ignored, as on the futures contract. They sweep no level, move no range, build no session and print no swing. The day runs 18:00 to 17:00 New York, so the daily roll, PDH / PDL and the IPDA day count follow CME. Off: the perpetual is read 24/7 on its own daily bar. Futures charts are never affected.")
+cmeClockOn = input.bool(true, "CME hours only", group = gDay, tooltip = "On perps that track a CME market (XYZ100 and every trade.xyz market, Binance CL), on intraday charts, ignore candles while CME is closed: Friday 17:00 to Sunday 18:00 New York, and 17:00-18:00 every weekday. The perp then reads like the futures contract. They sweep no level, move no range, build no session and print no swing. The day runs 18:00 to 17:00 New York, so the daily roll, PDH / PDL and the IPDA day count follow CME. Off: the perpetual is read 24/7 on its own daily bar. Futures charts are never affected.")
 
 gStyle = "4. Register style"
 lblSize     = input.string("Small", "Pane labels", options = ["Tiny", "Small", "Normal", "Large"], group = gStyle)
@@ -198,13 +217,15 @@ showRegister = input.bool(true, "Show register", group = gStyle)
 showOrigin  = input.bool(true,  "Origin labels", inline = "v", group = gStyle)
 showMarker  = input.bool(false, "Pending markers", inline = "v", group = gStyle)
 maxDistAtr  = input.float(0, "Hide beyond (x ATR)", minval = 0, maxval = 50, step = 0.5, group = gStyle, tooltip = "0 draws every level. Otherwise levels further than this many ATR from price are hidden until price approaches.")
-mergeTicks  = input.int(2, "Merge tolerance (ticks)", minval = 0, maxval = 50, group = gStyle, tooltip = "A merged tag set should mean the same structural price, not merely nearby swings. Keep this tight.")
+mergeTicks  = input.int(2, "Merge tolerance (ticks)", minval = 0, maxval = 50, group = gStyle, tooltip = "Levels this close merge into one line with combined tags. It is also how equal an equal is: two different candles within it make the level REH or REL. A merged tag set should mean the same structural price, not merely nearby swings. On NQ, 2 ticks is strict; 4-8 ticks (1-2 points) is closer to relative equal highs and lows.")
 
 gRange = "5. Dealing range"
 rotOn   = input.bool(true,  "Rotation range", group = gRange, tooltip = "The original engine. Any opposing registered purge re-anchors that side at the purging bar, so a retracement that takes internal liquidity re-anchors the range to that rotation.")
 frameOn = input.bool(false, "IPDA Frame", inline = "fr", group = gRange)
 ipdaLb  = input.int(20, "IPDA lookback (days)", options = [20, 40, 60], inline = "fr", group = gRange, tooltip = "IPDA Frame: external context, not a second dealing range. Framed the same way as Rotation, but once both sides are set only a purge of a pool at or beyond a boundary moves it, and a purge only widens it. Internal sweeps are repricing. It contracts on time: any boundary older than the lookback is re-anchored to that side's extreme inside the window, at the bar that printed it. The window is the current Daily bar plus the previous lookback-1, recalculated every day, so it agrees with the same count on a Daily chart. Until the chart holds a full window of Daily bars, no contraction happens and the frame is marked not ready with the days actually loaded - a 60D frame is never silently computed on fewer days.")
-primSel = input.string("Rotation", "Primary range", options = ["Rotation", "IPDA Frame", "Delivery"], group = gRange, tooltip = "The range the box, EQ, position, draw marker, boundary odds, volume profile, table and alerts all measure against. The primary draws solid with the labels below; any other range that is on draws quieter. If the chosen range is not live, it falls back to the first LIVE range in the order Rotation, IPDA Frame, Delivery, and the table marks the fallback.")
+primSel = input.string("Rotation", "Primary range", options = ["Rotation", "IPDA Frame", "Delivery", "Manual"], group = gRange, tooltip = "The range the box, EQ, position, draw marker, boundary odds, volume profile, table and alerts all measure against. The primary draws solid with the labels below; any other range that is on draws quieter. If the chosen range is not live, it falls back to the first LIVE range in the order Rotation, IPDA Frame, Delivery, and the table marks the fallback. Manual is your own range, set by the two times below.")
+manFrom = input.time(timestamp("2026-10-19T18:00:00-04:00"), "Manual from", group = gRange, active = primSel == "Manual", tooltip = "Manual range: its high and low are the highest high and lowest low from the candle holding the first time through the candle holding the second, both included, anchored at the candles that made them. Pick the low's candle and the high's candle and both are in. The pickers follow TradingView's date convention, which may not be New York time: after setting them, check the range lines start on the candles you meant. While the second time is still ahead the range keeps growing; after it, the range is fixed and does not move when price trades beyond it. On the CME clock, candles while CME is shut are skipped. A start older than the loaded history begins at the first loaded candle.")
+manTo   = input.time(timestamp("2026-10-20T17:00:00-04:00"), "Manual to", group = gRange, active = primSel == "Manual")
 showHi = input.bool(true, "Range high", inline = "rh", group = gRange)
 colHi  = input.color(#2962FF, "", inline = "rh", group = gRange)
 txtHi  = input.string("DR HIGH", "", inline = "rh", group = gRange)
@@ -216,16 +237,15 @@ txtLo  = input.string("DR LOW", "", inline = "rl", group = gRange)
 widLo  = input.int(1, "", minval = 1, maxval = 4, inline = "rl", group = gRange)
 
 showEq = input.bool(true, "Equilibrium", inline = "eq", group = gRange)
-colEq  = input.color(#787B86, "", inline = "eq", group = gRange)
+colEq  = input.color(#E0A800, "", inline = "eq", group = gRange)
 txtEq  = input.string("DR EQ", "", inline = "eq", group = gRange)
 widEq  = input.int(1, "", minval = 1, maxval = 4, inline = "eq", group = gRange)
 showPrice  = input.bool(true, "Show price on labels", group = gRange)
 extendBars = input.int(12, "Extend right (bars)", minval = 1, maxval = 200, group = gRange)
 edgeTrigger = input.bool(false, "Boundary violation counts as a purge", group = gRange, tooltip = "Off: only a registered liquidity sweep transitions the range, which is the faithful reading. On: price trading through a boundary also transitions it, which stops a stale boundary being drawn through price when no pool sits there.")
-boxOn   = input.bool(true, "Premium / discount box", group = gRange, tooltip = "Drawn over the primary range and split at 0.5 only: 1 at the high, 0 at the low. Its midline replaces the EQ stroke; the EQ label and its odds stay. PREMIUM and DISCOUNT text takes each half's colour at full strength.")
+boxOn   = input.bool(true, "Premium / discount box", group = gRange, tooltip = "Drawn over the primary range and split at 0.5 only: 1 at the high, 0 at the low. Its midline replaces the EQ stroke and takes the Equilibrium colour and width; the EQ label and its odds stay. PREMIUM and DISCOUNT text takes each half's colour at full strength.")
 colPrem = input.color(color.new(#787B86, 88), "Premium", inline = "bx", group = gRange)
 colDisc = input.color(color.new(#C9A227, 90), "Discount", inline = "bx", group = gRange)
-colMid  = input.color(#E0A800, "Midline", inline = "bx", group = gRange)
 
 gRef = "6. Delivery range"
 dlvOn  = input.bool(false, "Delivery range", inline = "rf", group = gRef)
@@ -248,10 +268,15 @@ oddsDim   = input.bool(true, "Dim below one-in-three", inline = "od", group = gO
 oddsFade  = input.int(25, "", minval = 0, maxval = 90, inline = "od", group = gOdds)
 
 gVc = "9. Volume context"
-vcOn       = input.bool(false, "Enable volume context", group = gVc, tooltip = "A volume profile and point of control anchored to the live dealing range. Nothing is computed or drawn until a range exists, and the whole thing recomputes when the range reframes. Not an ICT construct - treat it as context, not a signal.")
+vcOn       = input.bool(false, "Enable volume context", group = gVc, tooltip = "A volume profile, point of control and value area anchored to the live dealing range. Nothing is computed or drawn until a range exists, and the whole thing recomputes when the range reframes. Not an ICT construct - treat it as context, not a signal.")
 vcPocShow  = input.bool(true, "POC line", inline = "vp", group = gVc, tooltip = "The single highest-volume row in the range. Drawn from the older of the two boundary anchors and extended right with the range lines.")
 vcPocCol   = input.color(#E8A33D, "", inline = "vp", group = gVc)
 vcPocWid   = input.int(2, "", minval = 1, maxval = 4, inline = "vp", group = gVc)
+vcVaShow   = input.bool(true, "Value area", inline = "va", group = gVc, tooltip = "VAH and VAL: the band around the POC that holds this share of the volume traded inside the range, built by adding the heavier neighbouring row, above or below, until the share is reached. Inside it the market accepted price; beyond it trade thinned out. Seventy is the classical figure. Below fifty it marks only the dense core around the POC; with small values, lower the row multiplier so the edges move in finer steps.")
+vcVaCol    = input.color(color.new(#E8A33D, 40), "", inline = "va", group = gVc)
+vcVaPct    = input.int(70, "%", minval = 20, maxval = 95, inline = "va", group = gVc)
+vcFpOn     = input.bool(false, "Real volume at price", inline = "fp", group = gVc, tooltip = "Needs TradingView Premium or Ultimate. On: each candle's volume is placed at the prices it actually traded, from TradingView's footprint data, instead of being spread evenly across the candle's high to low. On a lower plan the script stops with an error while this is on - switch it off. Candles with no footprint data, such as history beyond what the plan provides, fall back to the even spread; the POC label's tooltip says how many candles used real data. Ticks per row sets the footprint's own row size: smaller is finer and slower.")
+vcFpTicks  = input.int(4, "ticks per row", minval = 1, maxval = 100, inline = "fp", group = gVc)
 vcProfShow  = input.bool(false, "Volume profile", inline = "vf", group = gVc, tooltip = "The full histogram. It is anchored outside the primary range / premium-discount box instead of against the last candle. Off by default - the POC line carries most of the information.")
 vcProfCol   = input.color(color.new(#424351, 50), "", inline = "vf", group = gVc)
 vcProfFill  = input.int(88, "", minval = 0, maxval = 100, inline = "vf", group = gVc)
@@ -584,6 +609,24 @@ f_label2(string name, float p) =>
     od = oddsLbl(p)
     str.length(od) > 0 ? base + "  " + od : base
 
+// distinct candles that printed this level; two or more make it a
+// relative equal high or low
+f_touches(Level x) =>
+    int n = 0
+    if not na(x.oT)
+        seen = array.new<int>()
+        for t in x.oT
+            if not seen.includes(t)
+                seen.push(t)
+        n := seen.size()
+    n
+
+// the level's tags, with REH / REL and the count once it is an equal
+f_tags(Level x) =>
+    int n = f_touches(x)
+    string s = tagText(x.tags)
+    n >= 2 ? s + " " + (x.hi ? "REH" : "REL") + "×" + str.tostring(n) : s
+
 lvlColor(Level x) =>
     color c = x.swept ? colSwept : colMtf
     if not x.swept
@@ -599,7 +642,7 @@ lvlColor(Level x) =>
     c
 
 markText(Level x) =>
-    tg = showOrigin ? tagText(x.tags) : ""
+    tg = showOrigin ? f_tags(x) : ""
     od = oddsAll and not x.swept ? oddsLbl(x.p) : ""
     if str.length(od) > 0
         tg := str.length(tg) > 0 ? tg + "  " + od : od
@@ -619,7 +662,7 @@ method restyle(Level x) =>
         label.set_text(x.lb, markText(x))
         label.set_textcolor(x.lb, c)
     if not na(x.tx)
-        label.set_text(x.tx, tagText(x.tags))
+        label.set_text(x.tx, f_tags(x))
         label.set_textcolor(x.tx, c)
     0
 
@@ -661,6 +704,13 @@ removeDone(int id) =>
 removeTagAt(int id, string tag) =>
     x = live.get(id)
     x.tags := delTag(x.tags, tag)
+    if not na(x.oG)
+        int k = x.oG.size() - 1
+        while k >= 0
+            if x.oG.get(k) == tag
+                x.oG.remove(k)
+                x.oT.remove(k)
+            k -= 1
     if str.length(x.tags) == 0
         removeLive(id)
     else
@@ -713,7 +763,7 @@ markSwept(Level x, int st) =>
         line.set_x2(x.ln, st)
     if showHistory and showRegister and showOrigin
         mid = x.x + int((st - x.x) / 2)
-        x.tx := label.new(mid, x.p, tagText(x.tags), xloc = xloc.bar_time, yloc = yloc.price, style = lblStyle(x.hi), color = color.new(color.black, 100), textcolor = colSwept, size = f_size(lblSize), textalign = text.align_center)
+        x.tx := label.new(mid, x.p, f_tags(x), xloc = xloc.bar_time, yloc = yloc.price, style = lblStyle(x.hi), color = color.new(color.black, 100), textcolor = colSwept, size = f_size(lblSize), textalign = text.align_center)
     else if not showHistory
         if not na(x.ln)
             line.delete(x.ln)
@@ -735,6 +785,8 @@ addLevel(float raw, bool hi, int ox, string tag) =>
         if id >= 0
             x = live.get(id)
             x.tags := addTag(x.tags, tag)
+            x.oT.push(ox)
+            x.oG.push(tag)
             if ox < x.x
                 x.x := ox
                 if not na(x.ln)
@@ -744,7 +796,7 @@ addLevel(float raw, bool hi, int ox, string tag) =>
             live.set(id, x)
             x.restyle()
         else
-            nx = Level.new(p, hi, ox, bar_index, tag, false, na, na, na, na)
+            nx = Level.new(p, hi, ox, bar_index, tag, false, na, na, na, na, array.from(ox), array.from(tag))
             c  = lvlColor(nx)
             if showRegister
                 nx.ln := line.new(ox, p, xRight, p, xloc = xloc.bar_time, color = c, width = regWidth, style = f_lnStyle())
@@ -959,14 +1011,14 @@ if barstate.isconfirmed and cmeOpen
                     drawSwept := true
                 sweptHiMax := na(sweptHiMax) ? x.p : math.max(sweptHiMax, x.p)
                 if str.length(poolHiTag) == 0
-                    poolHiTag := tagText(x.tags)
+                    poolHiTag := f_tags(x)
             else
                 poolLo := true
                 if drawPrevSide == -1 and not na(drawPrev) and math.abs(x.p - drawPrev) <= syminfo.mintick * 0.5
                     drawSwept := true
                 sweptLoMin := na(sweptLoMin) ? x.p : math.min(sweptLoMin, x.p)
                 if str.length(poolLoTag) == 0
-                    poolLoTag := tagText(x.tags)
+                    poolLoTag := f_tags(x)
             pruneDone()
         else
             i += 1
@@ -1267,6 +1319,29 @@ if barstate.isconfirmed and cmeOpen
     if dlvOn
         dlv.step(passHi, passLo, oSwLo, oSwHi)
 
+// ── manual range ─────────────────────────────────────────────
+// the extremes from the candle holding manFrom through the candle holding
+// manTo, both included, anchored at the candles that printed them. On any
+// timeframe the candle a time falls in counts. Nothing moves it after.
+
+var float mHi  = na
+var float mLo  = na
+var int   mHiT = na
+var int   mLoT = na
+var int   mHiB = na
+var int   mLoB = na
+manOn = primSel == "Manual"
+if manOn and barstate.isconfirmed and cmeOpen and time_close > manFrom and time <= manTo
+    if na(mHi) or high > mHi
+        mHi  := high
+        mHiT := time
+        mHiB := bar_index
+    if na(mLo) or low < mLo
+        mLo  := low
+        mLoT := time
+        mLoB := bar_index
+manLive = manOn and not na(mHi) and not na(mLo) and mHi > mLo
+
 // ── primary range ────────────────────────────────────────────
 // the box, EQ, position, draw, boundary odds, volume profile, table
 // and alerts all measure against this one
@@ -1277,28 +1352,29 @@ dlvLive = dlvOn and dlv.dir != 0 and not na(dlv.hi) and not na(dlv.lo) and dlv.h
 
 // the chosen range if it is live, else the first live range, else the
 // chosen one if switched on (so the table can show it developing)
-reqLive = primSel == "Rotation" ? rotLive : primSel == "IPDA Frame" ? frmLive : dlvLive
-reqOn   = primSel == "Rotation" ? rotOn : primSel == "IPDA Frame" ? frameOn : dlvOn
+reqLive = primSel == "Rotation" ? rotLive : primSel == "IPDA Frame" ? frmLive : primSel == "Delivery" ? dlvLive : manLive
+reqOn   = primSel == "Rotation" ? rotOn : primSel == "IPDA Frame" ? frameOn : primSel == "Delivery" ? dlvOn : manOn
 prim    = reqLive ? primSel : rotLive ? "Rotation" : frmLive ? "IPDA Frame" : dlvLive ? "Delivery" : reqOn ? primSel : rotOn ? "Rotation" : frameOn ? "IPDA Frame" : dlvOn ? "Delivery" : "None"
 frmName  = "IPDA Frame " + str.tostring(ipdaLb) + "D" + (ipdaReady ? "" : " (not ready, " + str.tostring(ipDays) + "D loaded)")
 primName = (prim == "IPDA Frame" ? frmName : prim) + (prim != primSel and prim != "None" ? " (fallback)" : "")
 isRot = prim == "Rotation"
 isFrm = prim == "IPDA Frame"
 isDlv = prim == "Delivery"
+isMan = prim == "Manual"
 
-cHi  = isRot ? rot.hi  : isFrm ? frm.hi  : isDlv ? dlv.hi  : float(na)
-cLo  = isRot ? rot.lo  : isFrm ? frm.lo  : isDlv ? dlv.lo  : float(na)
-cHiT = isRot ? rot.hiT : isFrm ? frm.hiT : isDlv ? dlv.hiT : int(na)
-cLoT = isRot ? rot.loT : isFrm ? frm.loT : isDlv ? dlv.loT : int(na)
-cHiB = isRot ? rot.hiB : isFrm ? frm.hiB : isDlv ? dlv.hiB : int(na)
-cLoB = isRot ? rot.loB : isFrm ? frm.loB : isDlv ? dlv.loB : int(na)
+cHi  = isRot ? rot.hi  : isFrm ? frm.hi  : isDlv ? dlv.hi  : isMan ? mHi  : float(na)
+cLo  = isRot ? rot.lo  : isFrm ? frm.lo  : isDlv ? dlv.lo  : isMan ? mLo  : float(na)
+cHiT = isRot ? rot.hiT : isFrm ? frm.hiT : isDlv ? dlv.hiT : isMan ? mHiT : int(na)
+cLoT = isRot ? rot.loT : isFrm ? frm.loT : isDlv ? dlv.loT : isMan ? mLoT : int(na)
+cHiB = isRot ? rot.hiB : isFrm ? frm.hiB : isDlv ? dlv.hiB : isMan ? mHiB : int(na)
+cLoB = isRot ? rot.loB : isFrm ? frm.loB : isDlv ? dlv.loB : isMan ? mLoB : int(na)
 
 // a bearish delivery follows a buy-side raid, so it reads as tracking the high
 primSt  = isRot ? rot.st : isFrm ? frm.st : isDlv ? -dlv.dir : 0
 primAmb = isRot ? rot.amb : isFrm ? frm.amb : false
-primDev = isRot ? (rot.hiSet or rot.loSet) : isFrm ? (frm.hiSet or frm.loSet) : isDlv ? (dlv.pend != 0) : false
+primDev = isRot ? (rot.hiSet or rot.loSet) : isFrm ? (frm.hiSet or frm.loSet) : isDlv ? (dlv.pend != 0) : isMan ? not na(mHi) : false
 
-rangeLive = (isRot ? rotLive : isFrm ? frmLive : isDlv ? dlvLive : false) and not na(cHi) and not na(cLo) and cHi > cLo
+rangeLive = (isRot ? rotLive : isFrm ? frmLive : isDlv ? dlvLive : isMan ? manLive : false) and not na(cHi) and not na(cLo) and cHi > cLo
 
 var bool wasLive = false
 firstLive = rangeLive and not wasLive
@@ -1326,7 +1402,7 @@ if rangeLive and drawSide != 0 and live.size() > 0
         if (x.hi and drawSide == 1 and x.p > close) or (not x.hi and drawSide == -1 and x.p < close)
             if na(drawLvl) or math.abs(x.p - close) < math.abs(drawLvl - close)
                 drawLvl := x.p
-                drawTag := tagText(x.tags)
+                drawTag := f_tags(x)
 
 drawPrev     := drawLvl
 drawPrevSide := na(drawLvl) ? 0 : drawSide
@@ -1347,11 +1423,17 @@ var array<line>  exLines  = array.new<line>()
 var array<label> exLabels = array.new<label>()
 var array<box>   exBoxes  = array.new<box>()
 
+// a label on the same row as a primary range label drops one row below it
+f_lblStyle(float p) =>
+    float d = rangeLive ? math.max(tol, 0.015 * (cHi - cLo)) : tol
+    bool clash = rangeLive and (math.abs(p - cHi) <= d or math.abs(p - cLo) <= d or (showEq and math.abs(p - wkEq) <= d))
+    clash ? label.style_label_upper_left : label.style_label_left
+
 f_other(float h, float l, int hT, int lT, string name, color cH, color cL, int w, string sty, bool mid) =>
     exLines.push(line.new(hT, h, xRight, h, xloc = xloc.bar_time, color = cH, width = w, style = sty))
     exLines.push(line.new(lT, l, xRight, l, xloc = xloc.bar_time, color = cL, width = w, style = sty))
-    exLabels.push(label.new(xRight, h, f_label(name + " HIGH", h), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(cH, 100), textcolor = cH, size = f_size(lblSize)))
-    exLabels.push(label.new(xRight, l, f_label(name + " LOW", l), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(cL, 100), textcolor = cL, size = f_size(lblSize)))
+    exLabels.push(label.new(xRight, h, f_label(name + " HIGH", h), xloc = xloc.bar_time, style = f_lblStyle(h), color = color.new(cH, 100), textcolor = cH, size = f_size(lblSize)))
+    exLabels.push(label.new(xRight, l, f_label(name + " LOW", l), xloc = xloc.bar_time, style = f_lblStyle(l), color = color.new(cL, 100), textcolor = cL, size = f_size(lblSize)))
     if mid
         m = (h + l) / 2
         exLines.push(line.new(math.max(hT, lT), m, xRight, m, xloc = xloc.bar_time, color = cH, width = 1, style = line.style_dotted))
@@ -1391,7 +1473,7 @@ if barstate.islast
             lbLo := label.new(xRight, cLo, f_label2(txtLo, cLo), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(colLo, 100), textcolor = colLo, size = f_size(lblSize))
         if showEq
             // with the box on, its gold midline is the EQ stroke; the label stays
-            cEq = boxOn ? colMid : colEq
+            cEq = colEq
             if not boxOn
                 eqStart = math.max(cHiT, cLoT)
                 lnEq := line.new(eqStart, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colEq, width = widEq, style = line.style_dashed)
@@ -1404,9 +1486,9 @@ if barstate.islast
             cNone = color.new(color.black, 100)
             exBoxes.push(box.new(bxL, cHi, xRight, wkEq, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colPrem, text = "PREMIUM", text_color = cPm, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_top))
             exBoxes.push(box.new(bxL, wkEq, xRight, cLo, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colDisc, text = "DISCOUNT", text_color = cDs, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_bottom))
-            exLines.push(line.new(bxL, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colMid, width = 1, style = line.style_solid))
+            exLines.push(line.new(bxL, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colEq, width = widEq, style = line.style_solid))
             exLabels.push(label.new(bxL, cHi,  "1",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cPm,    size = f_size(lblSize)))
-            exLabels.push(label.new(bxL, wkEq, "0.5", xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = colMid, size = f_size(lblSize)))
+            exLabels.push(label.new(bxL, wkEq, "0.5", xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = colEq, size = f_size(lblSize)))
             exLabels.push(label.new(bxL, cLo,  "0",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cDs,    size = f_size(lblSize)))
         // no fallback: a range boundary is not automatically an unswept objective
         if showDraw and drawSide != 0 and not na(drawLvl)
@@ -1436,21 +1518,44 @@ if barstate.islast
 // the range, which is the only thing the range can speak to.
 
 var float    vcPoc   = na
+var float    vcVah   = na
+var float    vcVal   = na
 var bool     vcValid = false
 var polyline vcPoly  = na
 var line     vcLine  = na
 var label    vcLbl   = na
+var line     vcVahLn = na
+var line     vcValLn = na
+var label    vcVahLb = na
+var label    vcValLb = na
 
 vcAtr = ta.atr(vcAtrLen)
+
+// Real volume at price. The request sits behind a real conditional, so
+// with the option off it never runs and lower plans never hit the
+// footprint plan check.
+footprint vcFp = na
+if vcOn and vcFpOn
+    vcFp := request.footprint(ticks_per_row = vcFpTicks, va_percent = vcVaPct, imbalance_percent = 300)
 
 if barstate.islast
     polyline.delete(vcPoly)
     line.delete(vcLine)
     label.delete(vcLbl)
+    line.delete(vcVahLn)
+    line.delete(vcValLn)
+    label.delete(vcVahLb)
+    label.delete(vcValLb)
     vcPoly  := na
     vcLine  := na
     vcLbl   := na
+    vcVahLn := na
+    vcValLn := na
+    vcVahLb := na
+    vcValLb := na
     vcPoc   := na
+    vcVah   := na
+    vcVal   := na
     vcValid := false
 
     if vcOn and rangeLive and not na(vcAtr) and vcAtr > 0 and not na(cHiB) and not na(cLoB)
@@ -1471,14 +1576,36 @@ if barstate.islast
             int vStart  = math.min(math.max(vAnchor, bar_index - vcMaxLook), bar_index)
 
             bins = array.new<float>(vRows, 0.0)
+            int vBars  = 0   // candles in the profile
+            int vFpBar = 0   // of which placed from footprint data
 
             for i = vStart to bar_index
                 int   off = bar_index - i
                 float bh  = high[off]
                 float bl  = low[off]
                 float bv  = volume[off]
-
+                // on the CME clock, candles printed while CME was shut
+                // carry no volume into the profile
+                if onCmeClock and not cmeOpen[off]
+                    bv := na
+                footprint fb = na
+                if vcFpOn and not na(bv)
+                    fb := vcFp[off]
                 if not na(bh) and not na(bl) and not na(bv) and bv > 0
+                    vBars += 1
+
+                if not na(fb)
+                    // each footprint row's volume goes to the profile row
+                    // holding its midpoint; rows outside the range are not
+                    // credited, as with the even spread
+                    vFpBar += 1
+                    for rw in fb.rows()
+                        float rm = (rw.up_price() + rw.down_price()) / 2
+                        float rv = rw.buy_volume() + rw.sell_volume()
+                        if rm >= vBot and rm <= vTop and rv > 0
+                            int ix = math.max(0, math.min(vRows - 1, int(math.floor((rm - vBot) / vBin))))
+                            array.set(bins, ix, array.get(bins, ix) + rv)
+                else if not na(bh) and not na(bl) and not na(bv) and bv > 0
                     float ch = math.min(bh, vTop)
                     float cl = math.max(bl, vBot)
 
@@ -1505,10 +1632,36 @@ if barstate.islast
                 vcPoc   := vBot + pocIdx * vBin + vBin / 2
                 vcValid := true
 
+                // value area: grow from the POC row, each step taking the
+                // heavier neighbouring row, until it holds vcVaPct of the
+                // volume traded inside the range
+                float vSum = array.sum(bins)
+                int   vaLo = pocIdx
+                int   vaHi = pocIdx
+                float vaV  = vMax
+                while vaV < vSum * vcVaPct / 100.0 and (vaLo > 0 or vaHi < vRows - 1)
+                    float vaUp = vaHi < vRows - 1 ? array.get(bins, vaHi + 1) : -1.0
+                    float vaDn = vaLo > 0 ? array.get(bins, vaLo - 1) : -1.0
+                    if vaUp >= vaDn
+                        vaHi += 1
+                        vaV  += vaUp
+                    else
+                        vaLo -= 1
+                        vaV  += vaDn
+                vcVah := vBot + (vaHi + 1) * vBin
+                vcVal := vBot + vaLo * vBin
+
+                int vX1 = math.min(cHiT, cLoT)
                 if vcPocShow
-                    int vX1 = math.min(cHiT, cLoT)
+                    string vSrc = not vcFpOn ? "Volume spread evenly across each candle's range." : "Real volume at price on " + str.tostring(vFpBar) + " of " + str.tostring(vBars) + " candles; the rest spread evenly."
                     vcLine := line.new(vX1, vcPoc, xRight, vcPoc, xloc = xloc.bar_time, color = vcPocCol, width = vcPocWid, style = line.style_solid)
-                    vcLbl  := label.new(xRight, vcPoc, f_label2("POC", vcPoc), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcPocCol, 100), textcolor = vcPocCol, size = f_size(lblSize))
+                    vcLbl  := label.new(xRight, vcPoc, f_label2("POC", vcPoc), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcPocCol, 100), textcolor = vcPocCol, size = f_size(lblSize), tooltip = vSrc)
+
+                if vcVaShow
+                    vcVahLn := line.new(vX1, vcVah, xRight, vcVah, xloc = xloc.bar_time, color = vcVaCol, width = 1, style = line.style_dashed)
+                    vcValLn := line.new(vX1, vcVal, xRight, vcVal, xloc = xloc.bar_time, color = vcVaCol, width = 1, style = line.style_dashed)
+                    vcVahLb := label.new(xRight, vcVah, f_label2("VAH", vcVah), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcVaCol, 100), textcolor = vcVaCol, size = f_size(lblSize))
+                    vcValLb := label.new(xRight, vcVal, f_label2("VAL", vcVal), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcVaCol, 100), textcolor = vcVaCol, size = f_size(lblSize))
 
                 if vcProfShow
                     // Permanent placement model:
@@ -1560,7 +1713,7 @@ f_row(table tt, int r, string k, string v) =>
 var table t = na
 if tblOn and barstate.islast
     table.delete(t)
-    t := table.new(f_pos(tblPos), 2, vcOn ? 10 : 9, bgcolor = tblBg, border_color = tblBorder, border_width = 1, frame_color = tblBorder, frame_width = 1)
+    t := table.new(f_pos(tblPos), 2, vcOn ? (vcVaShow ? 11 : 10) : 9, bgcolor = tblBg, border_color = tblBorder, border_width = 1, frame_color = tblBorder, frame_width = 1)
     f_row(t, 0, "Range",      stateTxt)
     f_row(t, 1, "Range high", rangeLive ? fmt_tick(cHi) + f_od(cHi) : "—")
     f_row(t, 2, "Range low",  rangeLive ? fmt_tick(cLo) + f_od(cLo) : "—")
@@ -1572,6 +1725,8 @@ if tblOn and barstate.islast
     f_row(t, 8, "Risk (1R)",  riskTxt)
     if vcOn
         f_row(t, 9, "POC", vcValid ? fmt_tick(vcPoc) + f_od(vcPoc) : "—")
+        if vcVaShow
+            f_row(t, 10, "Value area", vcValid ? fmt_tick(vcVah) + " / " + fmt_tick(vcVal) : "—")
 
 // ═════════════════════════════════════════════════════════════
 // Alerts
