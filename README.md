@@ -8,7 +8,7 @@ It tells you where price sits inside a range that liquidity has defined. It does
 
 ## What it draws
 
-**Liquidity register.** Swing highs and lows from up to five timeframes, three sessions, and the previous day's high and low. Levels at the same price merge into one line with combined tags, so a level that is both 1H and 4H structure reads `1h,4h`. A level is swept by a wick, a touch counts, and its line stops at the candle that took it.
+**Liquidity register.** Swing highs and lows from up to five timeframes, three sessions, and the previous day's high and low. Levels at the same price merge into one line with combined tags, so a level that is both 1H and 4H structure reads `1h,4h`. A level is swept by a wick, a touch counts, and its line stops at the candle that took it. When two or more different candles print a level within the merge tolerance, it is a relative equal high or low and its tag says so, for example `1h,4h REH×2`. The same wick reported by 1H, 4H and a session counts once, so it can't fake an equal. On NQ the default 2 ticks is strict; 4 to 8 ticks is closer to what I'd call equal.
 
 **Dealing range.** High, low and equilibrium, framed only by registered sweeps. The side being tracked follows price to its extreme.
 
@@ -46,7 +46,7 @@ If one candle takes both sides, the script does not guess which came first. It a
 |---|---|
 | 1. Timeframes | Five swing sources (1H, 4H and Daily on; Weekly and 15m off), levels kept per tag, swing length |
 | 2. Sessions | Three sessions with editable names and times, New York time. Asia 20:00–00:00 and London 02:00–05:00 on, New York 09:30–12:00 off |
-| 3. Daily levels | PDH / PDL from the completed daily bar. Daily reset. CME clock for perps |
+| 3. Daily levels | PDH / PDL from the completed daily bar. Daily reset. CME hours only, for perps |
 | 4. Register style | Line style, swept-level history, origin labels, hide levels beyond a distance, merge tolerance |
 | 5. Dealing range | The three ranges, primary selector with a manual range, labels, colours, premium / discount box |
 | 6. Delivery range | Toggle and style |
@@ -57,7 +57,7 @@ If one candle takes both sides, the script does not guess which came first. It a
 
 Only sources at or above the chart timeframe are used. On a 1H chart that is 1H, 4H and Daily. On a 4H chart, 4H and Daily. A source finer than the chart is skipped, not approximated.
 
-## CME clock
+## CME hours only
 
 I trade perps that mirror CME markets, and a perp keeps printing when CME is shut. A weekend wick on XYZ100 that takes a 1H high never happened on NQ, and it should not frame a range. So on a trade.xyz market (HIP3XYZ) or Binance's CL perp, on an intraday chart, the script reads the perp as the futures contract would print it:
 
@@ -65,7 +65,7 @@ I trade perps that mirror CME markets, and a perp keeps printing when CME is shu
 - the day runs 18:00 to 17:00 New York, as on CME. The daily roll, PDH / PDL and the IPDA day count follow that day, and PDH / PDL are taken from the candles CME would have printed
 - a higher-timeframe swing whose candle opened while CME was shut is dropped. The candles around it are still the perp's own, so a weekend spike can occasionally stop a Friday high from counting as a swing
 
-It is on by default ("Hold perpetual futures to the CME clock" in group 3), with the same symbol list and setting name as Dealing Range Liquidity Reversal. A true crypto perp is never clocked, and futures charts are never affected. If your perp is on another exchange, it is not on the list and runs 24/7.
+It is on by default ("CME hours only" in group 3), with the same symbol list as Dealing Range Liquidity Reversal. A true crypto perp is never clocked, and futures charts are never affected. If your perp is on another exchange, it is not on the list and runs 24/7.
 
 ## Table
 
