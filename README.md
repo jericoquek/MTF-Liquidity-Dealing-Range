@@ -1,115 +1,116 @@
-[MTF_Liquidity_Dealing_Range_User_Guide.md](https://github.com/user-attachments/files/34166174/MTF_Liquidity_Dealing_Range_User_Guide.md)
-# MTF Liquidity Dealing Range: User Guide
+[README.md](https://github.com/user-attachments/files/34303409/README.md)
+# MTF Liquidity Dealing Range
 
-## What it does
+A TradingView indicator (Pine Script v6) that builds the dealing range from liquidity that has actually been taken, across several timeframes at once.
 
-It marks the liquidity on your chart (swing highs and lows from higher timeframes, session highs and lows, the previous day's high and low) and builds a dealing range from the liquidity that has actually been taken.
+I built it from ICT's 2022 Mentorship dealing-range lecture. A dealing range only exists once liquidity has framed it: one side is purged, then the other. Until both have happened there is nothing to measure premium and discount against, and this script draws no range.
 
-A range only appears once price has swept a pool on one side and then the other. Until then there's nothing to measure against, and the indicator draws no range. Once there is one, it shows you whether price is in premium or discount, where equilibrium sits, and which pool is likely next.
+It tells you where price sits inside a range that liquidity has defined. It does not tell you which way to trade.
 
-It doesn't tell you which way to trade. That's your read. It tells you where price is inside the range liquidity has framed.
+## What it draws
 
-## Quick start
+**Liquidity register.** Swing highs and lows from up to five timeframes, three sessions, and the previous day's high and low. Levels at the same price merge into one line with combined tags, so a level that is both 1H and 4H structure reads `1h,4h`. A level is swept by a wick, a touch counts, and its line stops at the candle that took it. When two or more different candles print a level within the merge tolerance, it is a relative equal high or low and its tag says so, for example `1h,4h REH×2`. The same wick reported by 1H, 4H and a session counts once, so it can't fake an equal. On NQ the default 2 ticks is strict; 4 to 8 ticks is closer to what I'd call equal.
 
-1. Add it to a 1m–1H chart. It runs on any timeframe, but it's built for intraday.
-2. Leave the defaults alone for your first session.
-3. Wait for a range to frame: a **DR HIGH** and a **DR LOW**, with a premium/discount box over them.
-4. Read where price is: upper half is premium, lower half is discount, and the middle line is EQ.
-5. Look at the **draw**: the nearest untouched pool on the other side of the last sweep.
+**Dealing range.** High, low and equilibrium, framed only by registered sweeps. The side being tracked follows price to its extreme.
 
-## What you see on the chart
+**Premium / discount box.** Drawn over the range and split once at 0.5. Nothing else.
 
-| On the chart | What it means |
-|---|---|
-| Thin horizontal lines with tags like `1h`, `4h,Asia`, `PDH` | Liquidity pools, waiting to be taken. The tag says where each came from. Levels at the same price merge into one line. |
-| A tag ending in `REH×2` or `REL×3` | Relative equal highs or lows: two or more different candles printed this level. Engineered liquidity. |
-| A line that stops at a candle | That pool was swept by that candle. |
-| **DR HIGH / DR LOW** | The dealing range, framed by swept liquidity. |
-| **DR EQ** and the 0.5 line | Equilibrium, the middle of the range. |
-| **PREMIUM / DISCOUNT** box | Above 0.5 is premium, below is discount. |
-| Draw marker | The nearest unswept pool on the opposite side of the last sweep. |
-| Percentages next to levels | The odds of reaching that level before a 1R stop **with no edge at all**. That's the number your read has to beat. It isn't a forecast. |
-| **POC / VAH / VAL** (optional) | Where most of the volume inside the range traded, and the band that holds 70% of it. |
+**Draw on liquidity.** After the last sweep, the nearest unswept pool on the opposite side is marked with its tags.
 
-## How to read it
+**Odds.** Every live level is priced as the chance of reaching it before a 1R stop with no edge at all. It is the number your read has to beat, not a forecast.
 
-- **The last sweep sets the draw.** If sell-side was just taken, the draw is the nearest buy-side pool above.
-- **Premium isn't a short and discount isn't a long.** Take your bias from your own narrative, then use the range to judge whether price is in a good place to act on it.
-- **If one candle takes both sides,** the indicator doesn't guess which happened first. It waits for the next one-sided sweep.
+**Volume context.** Optional. A volume profile, point of control and value area anchored to the range. VAH and VAL bound the band around the POC that holds 70% of the volume traded inside the range: where the market accepted price, and where it didn't. By default each candle's volume is spread evenly from its high to its low. With "Real volume at price" on, it is placed at the prices it actually traded, from TradingView's footprint data. That needs Premium or Ultimate, so it is off by default; on a lower plan the script stops with an error until you switch it off. Candles with no footprint data fall back to the even spread, and the POC label's tooltip says how many used real data. With CME hours only on, candles printed while CME was closed add no volume.
 
-## The four ranges
+## Reading it
 
-Pick one as **Primary range** in group 5. Everything (the box, EQ, draw, odds, volume, table and alerts) measures against it.
+The last sweep sets the draw. If sell-side was taken last, the draw is the nearest buy-side pool, and the box shows whether price is in the premium or discount half of the range you set as primary.
 
-| Range | What builds it | Use it for |
+Premium is not a short and discount is not a long. Bias comes from your own narrative. The range only tells you whether price is somewhere worth acting from once you have one.
+
+If one candle takes both sides, the script does not guess which came first. It applies only what is true in either order and suspends the draw until the next one-sided sweep.
+
+## The three ranges
+
+| Range | What moves it | Default |
 |---|---|---|
-| **Rotation** (default) | Any opposing sweep moves that side | Day-to-day trading: where price sits between the last two pools taken |
-| **IPDA Frame** | Only sweeps at or beyond the edges, over 20, 40 or 60 days | The bigger picture |
-| **Delivery** | A sweep, then a candle close through the last opposing swing | Premium and discount of the current leg, for entering on its pullback |
-| **Manual** | Two times you set | Your own range. Set "Manual from" on the low's candle and "Manual to" on the high's candle. |
+| Rotation | Any opposing registered sweep re-anchors that side | On |
+| IPDA Frame | Only a sweep at or beyond a boundary, and only outward. Contracts on time: no boundary older than 20, 40 or 60 daily bars | Off |
+| Delivery | A raid, then a candle close through the last opposing swing. Runs from the raid extreme to the displacement extreme | Off |
 
-If the range you picked isn't live yet, it falls back to one that is, and the table marks it "(fallback)".
+**Primary range** picks which one the box, equilibrium, draw, odds, volume profile, table and alerts measure against. If the one you picked is not live, it falls back to one that is and says so in the table.
 
-## Settings in plain words
+**Manual range.** Sometimes I want the range I see, not the one liquidity framed. Pick "Manual" as the primary range and set two times, the same way as the Dated DR in Dealing Range Liquidity Reversal. Its high and low are the highest high and lowest low from the candle holding the first time through the candle holding the second, both included, anchored at the candles that made them. Pick the low's candle and the high's candle and both count. While the second time is still ahead it keeps growing; after that it is fixed, and price trading beyond it reads as above premium or below discount instead of moving it. Everything downstream measures against it. The automatic ranges keep running underneath and draw quieter, so switching back costs nothing. This breaks the rule the rest of the tool follows, that no range exists until liquidity frames one: it is your read, not the tool's.
 
-| Group | What's in it |
+## Settings
+
+| Group | What is in it |
 |---|---|
-| 1. Timeframes | Which higher timeframes supply swing levels (1H, 4H and Daily by default), and how many levels each keeps. Only timeframes at or above your chart's are used. |
-| 2. Sessions | Asia (20:00–00:00) and London (02:00–05:00) highs and lows, New York time. New York (09:30–12:00) is available, off by default. |
-| 3. Daily levels | Previous day high and low. **CME hours only**: on perps, ignores candles while CME is closed (see below). |
-| 4. Register style | How the level lines look. **Merge tolerance** also decides how close two levels must be to count as equal. |
-| 5. Dealing range | Which ranges run, which one is primary, the manual range times, colours, the premium/discount box. |
-| 6. Delivery range | Switch on the delivery range. |
-| 7. Draw | Mark the next pool. |
-| 8. Odds | How the odds are priced: risk from ATR, fixed points or the last swing, plus your trading cost. |
-| 9. Volume context | POC, value area and volume profile, anchored to the range. Off by default. |
-| 10. Table | A summary panel: range state, levels, position, last sweep, draw. Off by default. |
+| 1. Timeframes | Five swing sources (1H, 4H and Daily on; Weekly and 15m off), levels kept per tag, swing length |
+| 2. Sessions | Three sessions with editable names and times, New York time. Asia 20:00–00:00 and London 02:00–05:00 on, New York 09:30–12:00 off |
+| 3. Daily levels | PDH / PDL from the completed daily bar. Daily reset. CME hours only, for perps |
+| 4. Register style | Line style, swept-level history, origin labels, hide levels beyond a distance, merge tolerance |
+| 5. Dealing range | The three ranges, primary selector with a manual range, labels, colours, premium / discount box |
+| 6. Delivery range | Toggle and style |
+| 7. Draw | Mark the draw |
+| 8. Odds | Risk from an ATR multiple, manual points or the last swing. Round-trip cost. How far out to price |
+| 9. Volume context | POC line, value area, real volume at price (Premium), profile, row height, lookback |
+| 10. Table | Position and size |
 
-## Recommended starting settings
+Only sources at or above the chart timeframe are used. On a 1H chart that is 1H, 4H and Daily. On a 4H chart, 4H and Daily. A source finer than the chart is skipped, not approximated.
 
-**For CME futures (MNQ, NQ, ES and so on):**
-- Defaults are fine.
-- **Merge tolerance:** 4–8 ticks on NQ (1–2 points), so relative equal highs and lows get picked up.
+## CME hours only
 
-**For perps that track a CME market (XYZ100 and other trade.xyz markets, Binance CL):**
-- Keep **CME hours only** ticked. Weekend and daily-halt candles then don't sweep levels or move the range, and PDH/PDL follow the CME day. It has no effect on futures, so you can leave it ticked everywhere.
+I trade perps that mirror CME markets, and a perp keeps printing when CME is shut. A weekend wick on XYZ100 that takes a 1H high never happened on NQ, and it should not frame a range. So on a trade.xyz market (HIP3XYZ) or Binance's CL perp, on an intraday chart, the script reads the perp as the futures contract would print it:
 
-**Volume context (group 9), if you use it:**
+- candles from Friday 17:00 to Sunday 18:00 New York, and in the daily 17:00 to 18:00 halt, are ignored. They sweep no level, move no range, build no session and print no swing
+- the day runs 18:00 to 17:00 New York, as on CME. The daily roll, PDH / PDL and the IPDA day count follow that day, and PDH / PDL are taken from the candles CME would have printed
+- a higher-timeframe swing whose candle opened while CME was shut is dropped. The candles around it are still the perp's own, so a weekend spike can occasionally stop a Friday high from counting as a swing
 
-| Chart | Ticks per row on XYZ100 | Ticks per row on NQ | Max lookback |
-|---|---|---|---|
-| 1m | 1 | 2 | 1900 |
-| 5m | 2 | 4 | 1000, raise it if the range is older |
-| 15m | 4 | 8 | 1000 |
-| 1H | 10 | 20 | 1000 |
+It is on by default ("CME hours only" in group 3), with the same symbol list as Dealing Range Liquidity Reversal. A true crypto perp is never clocked, and futures charts are never affected. If your perp is on another exchange, it is not on the list and runs 24/7.
 
-- **Value area:** 70% is the classical figure. Lower it (down to 20%) for a tighter core around the POC.
-- **Real volume at price** needs TradingView Premium or Ultimate. Leave it off unless you have that plan. Hover over the POC label to see how many candles used real data.
+## Table
 
-## Common questions
+Range state, range high and low, delivery, equilibrium, position, last sweep, draw, risk (1R), and POC and value area when volume context is on. Off by default.
 
-**Why is there no range on my chart?**
-Liquidity hasn't framed one yet. It takes a sweep on one side, then the other. Wait for it, or pick Manual.
+## Alerts
 
-**My manual range doesn't reach the high I picked.**
-The candle holding each time is included. Check the To time is on the candle that made the high. The date pickers may not use New York time, so check that the lines start where you meant.
+| Alert | Fires when |
+|---|---|
+| Dealing range framed | The first pair completes |
+| Dealing range reframed | A later sweep changes the pair |
+| Boundary extended | The tracked side reaches a new extreme |
+| Draw reached | The exact pool that was the draw is swept |
+| BSL swept / SSL swept | Any registered pool on that side is taken |
+| Delivery range formed | A raid is followed by a close through structure |
+| IPDA Frame contracted | A boundary ages out of the lookback. A time event, not a liquidity event |
 
-**"Memory limits exceeded"**
-Switch off **Real volume at price** in group 9, or lower **Max lookback**.
+Sweeps and ranges are all decided on closed candles.
 
-**The indicator is slow to load.**
-Switch off swing timeframes you don't use, and leave Real volume at price off.
+## What it does not do
 
-**What does REH×2 mean?**
-Two different candles printed that level within the merge tolerance: relative equal highs. The same wick reported by several timeframes counts once.
+- It does not call direction.
+- It does not detect consolidation. I tried, against consolidations I marked by hand, and swings plus ATR could not tell a range from a trend reliably enough to trust. Every registered sweep reaches the range engines.
+- It does not guess the order when one candle takes both sides.
+- It does not treat a range boundary as unswept liquidity.
+- It does not see past the history TradingView has loaded. A 40 or 60 day IPDA frame may not be available on a 1m or 5m chart.
+- The odds figure is a no-edge baseline. It is not the probability your trade works.
 
-## What it doesn't do
+## Install
 
-- It doesn't call direction.
-- It doesn't guess which side was taken first when one candle takes both.
-- It doesn't treat a range edge as unswept liquidity.
-- It can't see further back than the history TradingView has loaded. A 40 or 60 day IPDA frame may not fit on a 1m or 5m chart.
-- The odds are a no-edge baseline, not the chance your trade works.
+Copy `MTF_Liquidity_Dealing_Range.pine` into the Pine Editor and add it to the chart. No dependencies.
 
----
-Pine Script v6. MPL-2.0. A charting tool, not financial advice.
+If a slow chart hits calculation limits with volume context on, lower "Max lookback" in group 9.
+
+## Credit
+
+The dealing-range model and the 20 / 40 / 60 day IPDA data ranges are ICT's, from the 2022 Mentorship.
+
+The register layout (five timeframe slots, sessions, merged tags) was modelled on the LQ MTF liquidity indicator. Wick-exact anchoring, per-tag trimming and drawing-object reuse came from studying Zeiierman's MTF Liquidity Stack. The volume profile's ATR binning follows BigBeluga's Structural Liquidity & POC Matrix. The footprint request follows ata_sabanci's Volume Footprint (MPL-2.0). The odds layer follows the first-passage pricing in The Distilled Odds. The delivery range came out of @Ed_tradess's notes on selecting the range from the actual delivery.
+
+## Licence
+
+MPL-2.0. See `LICENSE`.
+
+## Disclaimer
+
+This is a charting tool. It is not financial advice and it does not make trading decisions.
