@@ -251,7 +251,7 @@ widEq  = input.int(1, "", minval = 1, maxval = 4, inline = "eq", group = gRange)
 showPrice  = input.bool(true, "Show price on labels", group = gRange)
 extendBars = input.int(12, "Extend right (bars)", minval = 1, maxval = 200, group = gRange)
 edgeTrigger = input.bool(false, "Boundary violation counts as a purge", group = gRange, tooltip = "Off: only a registered liquidity sweep transitions the range, which is the faithful reading. On: price trading through a boundary also transitions it, which stops a stale boundary being drawn through price when no pool sits there.")
-boxOn   = input.bool(true, "Premium / discount box", group = gRange, tooltip = "Drawn over the primary range and split at 0.5 only: 1 at the high, 0 at the low. Its midline replaces the EQ stroke and takes the Equilibrium colour and width; the EQ label and its odds stay. PREMIUM and DISCOUNT text takes each half's colour at full strength.")
+boxOn   = input.bool(true, "Premium / discount box", group = gRange, tooltip = "Drawn over the primary range and split at 0.5 only: 1 at the high, 0 at the low. Its midline replaces the EQ stroke and takes the Equilibrium colour and width; the EQ label and its odds stay. PREMIUM and DISCOUNT text is #424351.")
 colPrem = input.color(color.new(#787B86, 88), "Premium", inline = "bx", group = gRange)
 colDisc = input.color(color.new(#C9A227, 90), "Discount", inline = "bx", group = gRange)
 
@@ -1497,8 +1497,8 @@ if barstate.islast
             cPm   = color.new(colPrem, 0)
             cDs   = color.new(colDisc, 0)
             cNone = color.new(color.black, 100)
-            exBoxes.push(box.new(bxL, cHi, xRight, wkEq, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colPrem, text = "PREMIUM", text_color = cPm, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_top))
-            exBoxes.push(box.new(bxL, wkEq, xRight, cLo, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colDisc, text = "DISCOUNT", text_color = cDs, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_bottom))
+            exBoxes.push(box.new(bxL, cHi, xRight, wkEq, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colPrem, text = "PREMIUM", text_color = #424351, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_top))
+            exBoxes.push(box.new(bxL, wkEq, xRight, cLo, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colDisc, text = "DISCOUNT", text_color = #424351, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_bottom))
             exLines.push(line.new(bxL, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colEq, width = widEq, style = line.style_solid))
             exLabels.push(label.new(bxL, cHi,  "1",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cPm,    size = f_size(lblSize)))
             exLabels.push(label.new(bxL, wkEq, "0.5", xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = colEq, size = f_size(lblSize)))
@@ -1753,7 +1753,7 @@ if barstate.islast
                     float dPoc = array.get(dlt, pocIdx)
                     string dWhen = str.format_time(time[bar_index - dFrom], "dd MMM HH:mm", "America/New_York")
                     string dTip = "Buy minus sell volume at each price, from " + (vcDltFrom == "Whole range" ? "the start of the profile" : "the range's turn") + " at " + dWhen + " New York, footprint data on " + str.tostring(dFpBar) + " of " + str.tostring(dBars) + " candles.\nTotal: " + (dSum >= 0 ? "+" : "") + str.tostring(dSum, format.volume) + "\nAt the POC: " + (dPoc >= 0 ? "+" : "") + str.tostring(dPoc, format.volume)
-                    vcDltLb := label.new(dAxis, vTop, "DELTA", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.black, 100), textcolor = color.new(#787B86, 0), size = f_size(lblSize), tooltip = dTip)
+                    vcDltLb := label.new(dAxis, vTop, "DELTA", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.black, 100), textcolor = #424351, size = f_size(lblSize), tooltip = dTip)
 
 // ═════════════════════════════════════════════════════════════
 // Table
