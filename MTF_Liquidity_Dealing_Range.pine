@@ -31,6 +31,10 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
+//   - Delta profile. With real volume at price on, a second column beside
+//     the volume profile shows buy minus sell volume at each row: blue to
+//     the right for net buying, red to the left for net selling. It is
+//     drawn only from footprint data, never estimated.
 //   - Relative equal highs and lows. A level counts the distinct candles
 //     that printed it. When two or more different candles sit within the
 //     merge tolerance, its tag reads REH or REL with the count, e.g.
@@ -282,6 +286,10 @@ vcProfCol   = input.color(color.new(#424351, 50), "", inline = "vf", group = gVc
 vcProfFill  = input.int(88, "", minval = 0, maxval = 100, inline = "vf", group = gVc)
 vcProfGap   = input.int(8, "Profile gap (bars)", minval = 0, maxval = 100, inline = "vg", group = gVc, tooltip = "Empty space between the right edge of the primary range / premium-discount box and the nearest edge of the widest volume-profile row.")
 vcProfWidth = input.int(32, "Profile width (bars)", minval = 5, maxval = 150, inline = "vg", group = gVc, tooltip = "Maximum histogram width. This changes the profile width without changing its gap from the range box.")
+vcDltShow  = input.bool(true, "Delta profile", inline = "dl", group = gVc, tooltip = "Needs Real volume at price on, and footprint data on the chart. A column beside the volume profile: at each row, buy volume minus sell volume. Blue to the right is net buying, red to the left is net selling. It is built only from footprint data, never estimated from candles, so it does not appear without it. Hover over the DELTA label for the range total, the delta at the POC, and how many candles it covers.")
+vcDltBuy   = input.color(color.new(#2962FF, 30), "", inline = "dl", group = gVc)
+vcDltSell  = input.color(color.new(#F23645, 30), "", inline = "dl", group = gVc)
+vcDltWidth = input.int(16, "width (bars)", minval = 4, maxval = 80, inline = "dl", group = gVc)
 vcAtrLen   = input.int(100, "ATR length", minval = 5, maxval = 500, inline = "vb", group = gVc)
 vcBinMult  = input.float(0.2, "x", minval = 0.02, maxval = 2.0, step = 0.02, inline = "vb", group = gVc, tooltip = "Row height is ATR times this multiplier, so rows scale to volatility rather than to a fixed tick count. Lower is finer and costs more to compute.")
 vcMaxRows  = input.int(150, "Max rows", minval = 10, maxval = 400, group = gVc, tooltip = "Caps the row count on very tall ranges. When the cap bites, row height is recomputed so the rows still tile the range exactly.")
@@ -1528,6 +1536,9 @@ var line     vcVahLn = na
 var line     vcValLn = na
 var label    vcVahLb = na
 var label    vcValLb = na
+var polyline vcDltUp = na
+var polyline vcDltDn = na
+var label    vcDltLb = na
 
 vcAtr = ta.atr(vcAtrLen)
 
@@ -1546,6 +1557,12 @@ if barstate.islast
     line.delete(vcValLn)
     label.delete(vcVahLb)
     label.delete(vcValLb)
+    polyline.delete(vcDltUp)
+    polyline.delete(vcDltDn)
+    label.delete(vcDltLb)
+    vcDltUp := na
+    vcDltDn := na
+    vcDltLb := na
     vcPoly  := na
     vcLine  := na
     vcLbl   := na
@@ -1576,6 +1593,7 @@ if barstate.islast
             int vStart  = math.min(math.max(vAnchor, bar_index - vcMaxLook), bar_index)
 
             bins = array.new<float>(vRows, 0.0)
+            dlt  = array.new<float>(vRows, 0.0)   // buy minus sell, footprint only
             int vBars  = 0   // candles in the profile
             int vFpBar = 0   // of which placed from footprint data
 
@@ -1605,6 +1623,7 @@ if barstate.islast
                         if rm >= vBot and rm <= vTop and rv > 0
                             int ix = math.max(0, math.min(vRows - 1, int(math.floor((rm - vBot) / vBin))))
                             array.set(bins, ix, array.get(bins, ix) + rv)
+                            array.set(dlt, ix, array.get(dlt, ix) + rw.buy_volume() - rw.sell_volume())
                 else if not na(bh) and not na(bl) and not na(bv) and bv > 0
                     float ch = math.min(bh, vTop)
                     float cl = math.max(bl, vBot)
@@ -1688,6 +1707,37 @@ if barstate.islast
                             array.push(pts, chart.point.from_index(profRight, pHi))
 
                     vcPoly := polyline.new(points = pts, closed = false, line_color = vcProfCol, fill_color = color.new(vcProfCol, vcProfFill), line_width = 1)
+
+                // delta column: right of the volume profile, an axis down
+                // its middle, net buying to the right and net selling to the
+                // left, scaled to the largest absolute row
+                float dAbs = math.max(math.abs(nz(array.max(dlt))), math.abs(nz(array.min(dlt))))
+                if vcDltShow and vcFpOn and vFpBar > 0 and dAbs > 0
+                    int   dLeft = bar_index + extendBars + vcProfGap + (vcProfShow ? vcProfWidth + 2 : 0)
+                    int   dHalf = math.max(2, int(vcDltWidth / 2))
+                    int   dAxis = dLeft + dHalf
+                    upPts = array.new<chart.point>()
+                    dnPts = array.new<chart.point>()
+                    array.push(upPts, chart.point.from_index(dAxis, vBot))
+                    array.push(dnPts, chart.point.from_index(dAxis, vBot))
+                    for k = 0 to vRows - 1
+                        float pLo = vBot + k * vBin
+                        float pHi = pLo + vBin
+                        float d   = array.get(dlt, k)
+                        int   wUp = d > 0 ? int(math.round(d / dAbs * dHalf)) : 0
+                        int   wDn = d < 0 ? int(math.round(-d / dAbs * dHalf)) : 0
+                        array.push(upPts, chart.point.from_index(dAxis + wUp, pLo))
+                        array.push(upPts, chart.point.from_index(dAxis + wUp, pHi))
+                        array.push(dnPts, chart.point.from_index(dAxis - wDn, pLo))
+                        array.push(dnPts, chart.point.from_index(dAxis - wDn, pHi))
+                    array.push(upPts, chart.point.from_index(dAxis, vTop))
+                    array.push(dnPts, chart.point.from_index(dAxis, vTop))
+                    vcDltUp := polyline.new(points = upPts, closed = true, line_color = vcDltBuy, fill_color = vcDltBuy, line_width = 1)
+                    vcDltDn := polyline.new(points = dnPts, closed = true, line_color = vcDltSell, fill_color = vcDltSell, line_width = 1)
+                    float dSum = array.sum(dlt)
+                    float dPoc = array.get(dlt, pocIdx)
+                    string dTip = "Buy minus sell volume at each price, from footprint data on " + str.tostring(vFpBar) + " of " + str.tostring(vBars) + " candles.\nRange total: " + (dSum >= 0 ? "+" : "") + str.tostring(dSum, format.volume) + "\nAt the POC: " + (dPoc >= 0 ? "+" : "") + str.tostring(dPoc, format.volume)
+                    vcDltLb := label.new(dAxis, vTop, "DELTA", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.black, 100), textcolor = color.new(#787B86, 0), size = f_size(lblSize), tooltip = dTip)
 
 // ═════════════════════════════════════════════════════════════
 // Table
