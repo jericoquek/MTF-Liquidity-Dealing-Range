@@ -34,7 +34,11 @@
 //   - Delta profile. With real volume at price on, a second column beside
 //     the volume profile shows buy minus sell volume at each row: blue to
 //     the right for net buying, red to the left for net selling. It is
-//     drawn only from footprint data, never estimated.
+//     drawn only from footprint data, never estimated. By default it
+//     starts at the range's turn - the newer of its two extremes, where
+//     the model that framed the range completed and the opposing one
+//     began - so it shows the side you are trading now. The volume
+//     profile, POC and value area stay on the whole range.
 //   - Relative equal highs and lows. A level counts the distinct candles
 //     that printed it. When two or more different candles sit within the
 //     merge tolerance, its tag reads REH or REL with the count, e.g.
@@ -290,6 +294,7 @@ vcDltShow  = input.bool(true, "Delta profile", inline = "dl", group = gVc, toolt
 vcDltBuy   = input.color(color.new(#2962FF, 30), "", inline = "dl", group = gVc)
 vcDltSell  = input.color(color.new(#F23645, 30), "", inline = "dl", group = gVc)
 vcDltWidth = input.int(16, "width (bars)", minval = 4, maxval = 80, inline = "dl", group = gVc)
+vcDltFrom  = input.string("Range turn", "Delta from", options = ["Range turn", "Whole range"], group = gVc, tooltip = "Range turn: delta starts at the newer of the range's two extremes - where the model that framed the range completed and the opposing one began. After a sell model completes at the low, it shows only the buy model from that low. Whole range: the same candles as the volume profile.")
 vcAtrLen   = input.int(100, "ATR length", minval = 5, maxval = 500, inline = "vb", group = gVc)
 vcBinMult  = input.float(0.2, "x", minval = 0.02, maxval = 2.0, step = 0.02, inline = "vb", group = gVc, tooltip = "Row height is ATR times this multiplier, so rows scale to volatility rather than to a fixed tick count. Lower is finer and costs more to compute.")
 vcMaxRows  = input.int(150, "Max rows", minval = 10, maxval = 400, group = gVc, tooltip = "Caps the row count on very tall ranges. When the cap bites, row height is recomputed so the rows still tile the range exactly.")
@@ -1596,6 +1601,11 @@ if barstate.islast
             dlt  = array.new<float>(vRows, 0.0)   // buy minus sell, footprint only
             int vBars  = 0   // candles in the profile
             int vFpBar = 0   // of which placed from footprint data
+            // delta window: from the range's turn (the newer extreme) or
+            // the whole profile
+            int dFrom  = vcDltFrom == "Whole range" ? vStart : math.max(vStart, math.max(cHiB, cLoB))
+            int dBars  = 0   // candles in the delta window
+            int dFpBar = 0   // of which carried footprint data
 
             for i = vStart to bar_index
                 int   off = bar_index - i
@@ -1611,6 +1621,10 @@ if barstate.islast
                     fb := vcFp[off]
                 if not na(bh) and not na(bl) and not na(bv) and bv > 0
                     vBars += 1
+                    if i >= dFrom
+                        dBars += 1
+                if not na(fb) and i >= dFrom
+                    dFpBar += 1
 
                 if not na(fb)
                     // each footprint row's volume goes to the profile row
@@ -1623,7 +1637,8 @@ if barstate.islast
                         if rm >= vBot and rm <= vTop and rv > 0
                             int ix = math.max(0, math.min(vRows - 1, int(math.floor((rm - vBot) / vBin))))
                             array.set(bins, ix, array.get(bins, ix) + rv)
-                            array.set(dlt, ix, array.get(dlt, ix) + rw.buy_volume() - rw.sell_volume())
+                            if i >= dFrom
+                                array.set(dlt, ix, array.get(dlt, ix) + rw.buy_volume() - rw.sell_volume())
                 else if not na(bh) and not na(bl) and not na(bv) and bv > 0
                     float ch = math.min(bh, vTop)
                     float cl = math.max(bl, vBot)
@@ -1712,7 +1727,7 @@ if barstate.islast
                 // its middle, net buying to the right and net selling to the
                 // left, scaled to the largest absolute row
                 float dAbs = math.max(math.abs(nz(array.max(dlt))), math.abs(nz(array.min(dlt))))
-                if vcDltShow and vcFpOn and vFpBar > 0 and dAbs > 0
+                if vcDltShow and vcFpOn and dFpBar > 0 and dAbs > 0
                     int   dLeft = bar_index + extendBars + vcProfGap + (vcProfShow ? vcProfWidth + 2 : 0)
                     int   dHalf = math.max(2, int(vcDltWidth / 2))
                     int   dAxis = dLeft + dHalf
@@ -1736,7 +1751,8 @@ if barstate.islast
                     vcDltDn := polyline.new(points = dnPts, closed = true, line_color = vcDltSell, fill_color = vcDltSell, line_width = 1)
                     float dSum = array.sum(dlt)
                     float dPoc = array.get(dlt, pocIdx)
-                    string dTip = "Buy minus sell volume at each price, from footprint data on " + str.tostring(vFpBar) + " of " + str.tostring(vBars) + " candles.\nRange total: " + (dSum >= 0 ? "+" : "") + str.tostring(dSum, format.volume) + "\nAt the POC: " + (dPoc >= 0 ? "+" : "") + str.tostring(dPoc, format.volume)
+                    string dWhen = str.format_time(time[bar_index - dFrom], "dd MMM HH:mm", "America/New_York")
+                    string dTip = "Buy minus sell volume at each price, from " + (vcDltFrom == "Whole range" ? "the start of the profile" : "the range's turn") + " at " + dWhen + " New York, footprint data on " + str.tostring(dFpBar) + " of " + str.tostring(dBars) + " candles.\nTotal: " + (dSum >= 0 ? "+" : "") + str.tostring(dSum, format.volume) + "\nAt the POC: " + (dPoc >= 0 ? "+" : "") + str.tostring(dPoc, format.volume)
                     vcDltLb := label.new(dAxis, vTop, "DELTA", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.black, 100), textcolor = color.new(#787B86, 0), size = f_size(lblSize), tooltip = dTip)
 
 // ═════════════════════════════════════════════════════════════
