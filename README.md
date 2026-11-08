@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/34303409/README.md)
 # MTF Liquidity Dealing Range
 
 A TradingView indicator (Pine Script v6) that builds the dealing range from liquidity that has actually been taken, across several timeframes at once.
@@ -19,7 +18,7 @@ It tells you where price sits inside a range that liquidity has defined. It does
 
 **Odds.** Every live level is priced as the chance of reaching it before a 1R stop with no edge at all. It is the number your read has to beat, not a forecast.
 
-**Volume context.** Optional. A volume profile, point of control and value area anchored to the range. VAH and VAL bound the band around the POC that holds 70% of the volume traded inside the range: where the market accepted price, and where it didn't. By default each candle's volume is spread evenly from its high to its low. With "Real volume at price" on, it is placed at the prices it actually traded, from TradingView's footprint data. That needs Premium or Ultimate, so it is off by default; on a lower plan the script stops with an error until you switch it off. Candles with no footprint data fall back to the even spread, and the POC label's tooltip says how many used real data. With CME hours only on, candles printed while CME was closed add no volume.
+**Volume context.** Optional. A volume profile, point of control and value area anchored to the range. VAH and VAL bound the band around the POC that holds 70% of the volume traded inside the range: where the market accepted price, and where it didn't. By default each candle's volume is spread evenly from its high to its low. With "Real volume at price" on, it is placed at the prices it actually traded, from TradingView's footprint data. That needs Premium or Ultimate, so it is off by default; on a lower plan the script stops with an error until you switch it off. Candles with no footprint data fall back to the even spread, and the POC label's tooltip says how many used real data. With real volume on, a delta column sits beside the profile: buy minus sell volume at each price, blue to the right for net buying, red to the left for net selling. It's built only from footprint data. There's no estimated delta, so without footprint data the column doesn't appear. By default the delta starts at the range's turn, the newer of its two extremes: where the model that framed the range completed and the opposing one began. Once a sell model completes at the low, the column shows only the buy model from that low, which is the side I'm trading. The profile, POC and value area stay on the whole range. "Delta from" switches it to the whole range. Hover over the DELTA label for where it starts, the total and the delta at the POC. With CME hours only on, candles printed while CME was closed add no volume.
 
 ## Reading it
 
@@ -53,7 +52,7 @@ If one candle takes both sides, the script does not guess which came first. It a
 | 6. Delivery range | Toggle and style |
 | 7. Draw | Mark the draw |
 | 8. Odds | Risk from an ATR multiple, manual points or the last swing. Round-trip cost. How far out to price |
-| 9. Volume context | POC line, value area, real volume at price (Premium), profile, row height, lookback |
+| 9. Volume context | POC line, value area, real volume at price (Premium), profile, delta profile (Premium), row height, lookback |
 | 10. Table | Position and size |
 
 Only sources at or above the chart timeframe are used. On a 1H chart that is 1H, 4H and Daily. On a 4H chart, 4H and Daily. A source finer than the chart is skipped, not approximated.
