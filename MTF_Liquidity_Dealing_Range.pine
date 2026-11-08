@@ -1494,15 +1494,13 @@ if barstate.islast
         // premium / discount box over the primary range, split at 0.5 only
         if boxOn
             bxL   = math.min(cHiT, cLoT)
-            cPm   = color.new(colPrem, 0)
-            cDs   = color.new(colDisc, 0)
             cNone = color.new(color.black, 100)
             exBoxes.push(box.new(bxL, cHi, xRight, wkEq, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colPrem, text = "PREMIUM", text_color = #424351, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_top))
             exBoxes.push(box.new(bxL, wkEq, xRight, cLo, xloc = xloc.bar_time, border_color = cNone, border_width = 1, bgcolor = colDisc, text = "DISCOUNT", text_color = #424351, text_size = f_size(lblSize), text_halign = text.align_right, text_valign = text.align_bottom))
             exLines.push(line.new(bxL, wkEq, xRight, wkEq, xloc = xloc.bar_time, color = colEq, width = widEq, style = line.style_solid))
-            exLabels.push(label.new(bxL, cHi,  "1",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cPm,    size = f_size(lblSize)))
+            exLabels.push(label.new(bxL, cHi,  "1",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = #424351,    size = f_size(lblSize)))
             exLabels.push(label.new(bxL, wkEq, "0.5", xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = colEq, size = f_size(lblSize)))
-            exLabels.push(label.new(bxL, cLo,  "0",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = cDs,    size = f_size(lblSize)))
+            exLabels.push(label.new(bxL, cLo,  "0",   xloc = xloc.bar_time, style = label.style_label_right, color = cNone, textcolor = #424351,    size = f_size(lblSize)))
         // no fallback: a range boundary is not automatically an unswept objective
         if showDraw and drawSide != 0 and not na(drawLvl)
             dOdds = oddsLbl(drawLvl)
