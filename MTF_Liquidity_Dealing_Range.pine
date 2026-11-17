@@ -1771,7 +1771,7 @@ if barstate.islast
                         float dNet = dBuy - dSel
                         int   bPct = int(math.round(dBuy / dTot * 100))
                         string sTxt = (dNet >= 0 ? "+" : "") + str.tostring(dNet, format.volume) + "\nBuy " + str.tostring(bPct) + "% · Sell " + str.tostring(100 - bPct) + "%"
-                        vcDltSum := label.new(dAxis, vBot, sTxt, xloc = xloc.bar_index, style = label.style_label_up, color = color.new(color.black, 100), textcolor = color.new(dNet >= 0 ? vcDltBuy : vcDltSell, 0), size = f_size(lblSize), tooltip = dTip)
+                        vcDltSum := label.new(dAxis, vBot, sTxt, xloc = xloc.bar_index, style = label.style_label_up, color = color.new(color.black, 100), textcolor = dNet >= 0 ? vcDltBuy : vcDltSell, size = f_size(lblSize), tooltip = dTip)
 
 // ═════════════════════════════════════════════════════════════
 // Table
