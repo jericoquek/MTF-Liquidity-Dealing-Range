@@ -31,6 +31,10 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
+//   - Turn delta: a second delta column, 20 bars right of the current
+//     candle, measuring the opposing leg - from the range's turn (the
+//     newer extreme) to now. Same rows, colours and totals as the swing
+//     delta; rows reach left from its line.
 //   - Volume profile and delta re-anchored at the swing: one composite
 //     profile measured from the range's older extreme (the swing) to its
 //     turn (the newer extreme), the leg that framed the range. It is drawn
@@ -1554,6 +1558,11 @@ var polyline vcDltUp = na
 var polyline vcDltDn = na
 var label    vcDltLb = na
 var label    vcDltSum = na
+var polyline vcD2Up  = na
+var polyline vcD2Dn  = na
+var label    vcD2Lb  = na
+var label    vcD2Sum = na
+VC_D2_GAP = 20   // bars between the current candle and the turn delta
 
 vcAtr = ta.atr(vcAtrLen)
 
@@ -1576,6 +1585,14 @@ if barstate.islast
     polyline.delete(vcDltDn)
     label.delete(vcDltLb)
     label.delete(vcDltSum)
+    polyline.delete(vcD2Up)
+    polyline.delete(vcD2Dn)
+    label.delete(vcD2Lb)
+    label.delete(vcD2Sum)
+    vcD2Up  := na
+    vcD2Dn  := na
+    vcD2Lb  := na
+    vcD2Sum := na
     vcDltSum := na
     vcDltUp := na
     vcDltDn := na
@@ -1617,8 +1634,14 @@ if barstate.islast
             int vFpBar = 0   // of which placed from footprint data
             float dBuy = 0.0 // buy volume in the leg
             float dSel = 0.0 // sell volume in the leg
+            // the opposing leg: from the turn to now, delta only
+            dlt2 = array.new<float>(vRows, 0.0)
+            float d2Buy = 0.0
+            float d2Sel = 0.0
+            int   d2Bars = 0
+            int   d2Fp   = 0
 
-            for i = vStart to vEnd
+            for i = vStart to bar_index
                 int   off = bar_index - i
                 float bh  = high[off]
                 float bl  = low[off]
@@ -1630,6 +1653,20 @@ if barstate.islast
                 footprint fb = na
                 if vcFpOn and not na(bv)
                     fb := vcFp[off]
+                bool inLeg1 = i <= vEnd
+                if i >= vEnd and not na(bv) and bv > 0
+                    d2Bars += 1
+                    if not na(fb)
+                        d2Fp += 1
+                        for rw in fb.rows()
+                            float rm2 = (rw.up_price() + rw.down_price()) / 2
+                            if rm2 >= vBot and rm2 <= vTop
+                                int ix2 = math.max(0, math.min(vRows - 1, int(math.floor((rm2 - vBot) / vBin))))
+                                array.set(dlt2, ix2, array.get(dlt2, ix2) + rw.buy_volume() - rw.sell_volume())
+                                d2Buy += rw.buy_volume()
+                                d2Sel += rw.sell_volume()
+                if not inLeg1
+                    continue
                 if not na(bh) and not na(bl) and not na(bv) and bv > 0
                     vBars += 1
 
@@ -1757,6 +1794,41 @@ if barstate.islast
                         int   bPct = int(math.round(dBuy / dTot * 100))
                         string sTxt = (dNet >= 0 ? "+" : "") + str.tostring(dNet, format.volume) + "\nBuy " + str.tostring(bPct) + "% · Sell " + str.tostring(100 - bPct) + "%"
                         vcDltSum := label.new(dMid, vBot, sTxt, xloc = xloc.bar_index, style = label.style_label_up, color = color.new(color.black, 100), textcolor = dNet >= 0 ? vcDltBuy : vcDltSell, size = f_size(lblSize), tooltip = dTip)
+
+                // turn delta: the opposing leg, from the turn to now, in its
+                // own column VC_D2_GAP bars right of the current candle
+                float d2Abs = math.max(math.abs(nz(array.max(dlt2))), math.abs(nz(array.min(dlt2))))
+                if vcDltShow and vcFpOn and d2Fp > 0 and d2Abs > 0
+                    int d2Axis = bar_index + VC_D2_GAP + vcDltWidth
+                    up2 = array.new<chart.point>()
+                    dn2 = array.new<chart.point>()
+                    array.push(up2, chart.point.from_index(d2Axis, vBot))
+                    array.push(dn2, chart.point.from_index(d2Axis, vBot))
+                    for k = 0 to vRows - 1
+                        float pLo = vBot + k * vBin
+                        float pHi = pLo + vBin
+                        float d   = array.get(dlt2, k)
+                        int   w   = int(math.round(math.abs(d) / d2Abs * vcDltWidth))
+                        int   wUp = d > 0 ? w : 0
+                        int   wDn = d < 0 ? w : 0
+                        array.push(up2, chart.point.from_index(d2Axis - wUp, pLo))
+                        array.push(up2, chart.point.from_index(d2Axis - wUp, pHi))
+                        array.push(dn2, chart.point.from_index(d2Axis - wDn, pLo))
+                        array.push(dn2, chart.point.from_index(d2Axis - wDn, pHi))
+                    array.push(up2, chart.point.from_index(d2Axis, vTop))
+                    array.push(dn2, chart.point.from_index(d2Axis, vTop))
+                    vcD2Up := polyline.new(points = up2, closed = true, line_color = vcDltBuy, fill_color = vcDltBuy, line_width = 1)
+                    vcD2Dn := polyline.new(points = dn2, closed = true, line_color = vcDltSell, fill_color = vcDltSell, line_width = 1)
+                    int    d2Mid  = d2Axis - int(vcDltWidth / 2)
+                    string d2From = str.format_time(time[bar_index - vEnd], "dd MMM HH:mm", "America/New_York")
+                    string d2Tip  = "Buy minus sell volume at each price, from the turn at " + d2From + " New York to now. Footprint data on " + str.tostring(d2Fp) + " of " + str.tostring(d2Bars) + " candles."
+                    vcD2Lb := label.new(d2Mid, vTop, "Delta", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.black, 100), textcolor = #424351, size = f_size(lblSize), tooltip = d2Tip)
+                    float d2Tot = d2Buy + d2Sel
+                    if d2Tot > 0
+                        float d2Net = d2Buy - d2Sel
+                        int   b2Pct = int(math.round(d2Buy / d2Tot * 100))
+                        string s2Txt = (d2Net >= 0 ? "+" : "") + str.tostring(d2Net, format.volume) + "\nBuy " + str.tostring(b2Pct) + "% · Sell " + str.tostring(100 - b2Pct) + "%"
+                        vcD2Sum := label.new(d2Mid, vBot, s2Txt, xloc = xloc.bar_index, style = label.style_label_up, color = color.new(color.black, 100), textcolor = d2Net >= 0 ? vcDltBuy : vcDltSell, size = f_size(lblSize), tooltip = d2Tip)
 
 // ═════════════════════════════════════════════════════════════
 // Table
