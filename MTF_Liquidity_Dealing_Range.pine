@@ -31,6 +31,9 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
+//   - Swing delta and turn delta switch on and off separately. When Max
+//     lookback cuts the swing leg short, the totals under the swing
+//     delta say where it actually starts.
 //   - Turn delta: a second delta column, 20 bars right of the current
 //     candle, measuring the opposing leg - from the range's turn (the
 //     newer extreme) to now. Same rows, colours and totals as the swing
@@ -306,10 +309,11 @@ vcProfShow  = input.bool(false, "Volume profile", inline = "vf", group = gVc, to
 vcProfCol   = input.color(color.new(#424351, 50), "", inline = "vf", group = gVc)
 vcProfFill  = input.int(88, "", minval = 0, maxval = 100, inline = "vf", group = gVc)
 vcProfWidth = input.int(32, "Profile width (bars)", minval = 5, maxval = 150, group = gVc, tooltip = "How far the widest volume row reaches to the right of the swing, in bars.")
-vcDltShow  = input.bool(true, "Delta profile", inline = "dl", group = gVc, tooltip = "Needs Real volume at price on, and footprint data on the chart. Drawn at the swing, to the left of the line the volume profile starts from: at each row, buy volume minus sell volume, blue where buyers won and red where sellers did, longer for a bigger margin. Same candles as the volume profile. Built only from footprint data, never estimated from candles, so it does not appear without it. Under it: the net delta in the winning side's colour and the buy / sell split. Hover for the delta at the POC and how many candles had footprint data.")
-vcDltBuy   = input.color(color.new(#2962FF, 30), "", inline = "dl", group = gVc)
-vcDltSell  = input.color(color.new(#F23645, 30), "", inline = "dl", group = gVc)
-vcDltWidth = input.int(16, "width (bars)", minval = 4, maxval = 80, inline = "dl", group = gVc)
+vcDltShow  = input.bool(true, "Swing delta", inline = "dl", group = gVc, tooltip = "Needs Real volume at price on, and footprint data on the chart. Drawn at the swing, to the left of the line the volume profile starts from: at each row, buy volume minus sell volume, blue where buyers won and red where sellers did, longer for a bigger margin. Same candles as the volume profile. Built only from footprint data, never estimated from candles, so it does not appear without it. Under it: the net delta in the winning side's colour and the buy / sell split. Hover for the delta at the POC and how many candles had footprint data. The turn delta is the same measure for the opposing leg, from the turn to now, in its own column 20 bars right of the current candle.")
+vcDlt2Show = input.bool(true, "Turn delta", inline = "dl", group = gVc)
+vcDltBuy   = input.color(color.new(#2962FF, 30), "Delta colours", inline = "dc", group = gVc)
+vcDltSell  = input.color(color.new(#F23645, 30), "", inline = "dc", group = gVc)
+vcDltWidth = input.int(16, "width (bars)", minval = 4, maxval = 80, inline = "dc", group = gVc)
 vcAtrLen   = input.int(100, "ATR length", minval = 5, maxval = 500, inline = "vb", group = gVc)
 vcBinMult  = input.float(0.2, "x", minval = 0.02, maxval = 2.0, step = 0.02, inline = "vb", group = gVc, tooltip = "Row height is ATR times this multiplier, so rows scale to volatility rather than to a fixed tick count. Lower is finer and costs more to compute.")
 vcMaxRows  = input.int(150, "Max rows", minval = 10, maxval = 400, group = gVc, tooltip = "Caps the row count on very tall ranges. When the cap bites, row height is recomputed so the rows still tile the range exactly.")
@@ -1627,6 +1631,7 @@ if barstate.islast
             int vAnchor = math.min(cHiB, cLoB)
             int vStart  = math.min(math.max(vAnchor, bar_index - vcMaxLook), bar_index)
             int vEnd    = math.max(vStart, math.min(math.max(cHiB, cLoB), bar_index))
+            string vCut = vStart > vAnchor ? " Cut short by Max lookback: it starts at " + str.format_time(time[bar_index - vStart], "dd MMM HH:mm", "America/New_York") + " New York, not at the swing. Raise Max lookback to cover it." : ""
 
             bins = array.new<float>(vRows, 0.0)
             dlt  = array.new<float>(vRows, 0.0)   // buy minus sell, footprint only
@@ -1732,7 +1737,7 @@ if barstate.islast
 
                 int vX1 = math.min(cHiT, cLoT)
                 if vcPocShow
-                    string vSrc = "Measured from the swing to the range's turn. " + (not vcFpOn ? "Volume spread evenly across each candle's range." : "Real volume at price on " + str.tostring(vFpBar) + " of " + str.tostring(vBars) + " candles; the rest spread evenly.")
+                    string vSrc = "Measured from the swing to the range's turn." + vCut + " " + (not vcFpOn ? "Volume spread evenly across each candle's range." : "Real volume at price on " + str.tostring(vFpBar) + " of " + str.tostring(vBars) + " candles; the rest spread evenly.")
                     vcLine := line.new(vX1, vcPoc, xRight, vcPoc, xloc = xloc.bar_time, color = vcPocCol, width = vcPocWid, style = line.style_solid)
                     vcLbl  := label.new(xRight, vcPoc, f_label2("POC", vcPoc), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(vcPocCol, 100), textcolor = vcPocCol, size = f_size(lblSize), tooltip = vSrc)
 
@@ -1792,13 +1797,13 @@ if barstate.islast
                     if dTot > 0
                         float dNet = dBuy - dSel
                         int   bPct = int(math.round(dBuy / dTot * 100))
-                        string sTxt = (dNet >= 0 ? "+" : "") + str.tostring(dNet, format.volume) + "\nBuy " + str.tostring(bPct) + "% · Sell " + str.tostring(100 - bPct) + "%"
+                        string sTxt = (dNet >= 0 ? "+" : "") + str.tostring(dNet, format.volume) + "\nBuy " + str.tostring(bPct) + "% · Sell " + str.tostring(100 - bPct) + "%" + (vStart > vAnchor ? "\nCut short: from " + dFrom + " (Max lookback)" : "")
                         vcDltSum := label.new(dMid, vBot, sTxt, xloc = xloc.bar_index, style = label.style_label_up, color = color.new(color.black, 100), textcolor = dNet >= 0 ? vcDltBuy : vcDltSell, size = f_size(lblSize), tooltip = dTip)
 
                 // turn delta: the opposing leg, from the turn to now, in its
                 // own column VC_D2_GAP bars right of the current candle
                 float d2Abs = math.max(math.abs(nz(array.max(dlt2))), math.abs(nz(array.min(dlt2))))
-                if vcDltShow and vcFpOn and d2Fp > 0 and d2Abs > 0
+                if vcDlt2Show and vcFpOn and d2Fp > 0 and d2Abs > 0
                     int d2Axis = bar_index + VC_D2_GAP + vcDltWidth
                     up2 = array.new<chart.point>()
                     dn2 = array.new<chart.point>()
