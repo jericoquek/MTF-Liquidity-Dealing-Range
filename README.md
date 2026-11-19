@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/34303409/README.md)
 # MTF Liquidity Dealing Range
 
 A TradingView indicator (Pine Script v6) that builds the dealing range from liquidity that has actually been taken, across several timeframes at once.
@@ -19,7 +18,7 @@ It tells you where price sits inside a range that liquidity has defined. It does
 
 **Odds.** Every live level is priced as the chance of reaching it before a 1R stop with no edge at all. It is the number your read has to beat, not a forecast.
 
-**Volume context.** Optional. A volume profile, point of control and value area anchored to the range. VAH and VAL bound the band around the POC that holds 70% of the volume traded inside the range: where the market accepted price, and where it didn't. By default each candle's volume is spread evenly from its high to its low. With "Real volume at price" on, it is placed at the prices it actually traded, from TradingView's footprint data. That needs Premium or Ultimate, so it is off by default; on a lower plan the script stops with an error until you switch it off. Candles with no footprint data fall back to the even spread, and the POC label's tooltip says how many used real data. With CME hours only on, candles printed while CME was closed add no volume.
+**Volume context.** Optional. A fixed-range volume profile anchored at the swing, the range's older extreme. It measures the leg from that swing to the range's turn, the newer extreme: the move that framed the range. It's drawn on the chart at the swing, with volume to the right of a line and delta to the left. Delta is buy minus sell volume at each price, blue where buyers won and red where sellers did, with the net delta and the buy/sell split under it. A second delta column sits 20 bars to the right of the current candle. It measures the opposing leg, from the turn to now: in MMXM terms, the model you're trading. It uses the same rows, colours and totals, so the two legs can be compared side by side. "Swing delta" and "Turn delta" switch on and off separately. If the swing is older than Max lookback, the swing leg starts at the cap, and the totals under it say "Cut short". On a 1m chart, set Max lookback to 1900. The POC and value area (VAH/VAL, 70% by default) measure the swing leg, the same candles as the profile. By default each candle's volume is spread evenly from its high to its low. With "Real volume at price" on, it's placed at the prices it actually traded, from TradingView's footprint data. That needs Premium or Ultimate and is off by default. Delta exists only with footprint data; there's no estimated delta. With CME hours only on, candles printed while CME was closed add no volume.
 
 ## Reading it
 
@@ -53,7 +52,7 @@ If one candle takes both sides, the script does not guess which came first. It a
 | 6. Delivery range | Toggle and style |
 | 7. Draw | Mark the draw |
 | 8. Odds | Risk from an ATR multiple, manual points or the last swing. Round-trip cost. How far out to price |
-| 9. Volume context | POC line, value area, real volume at price (Premium), profile, row height, lookback |
+| 9. Volume context | POC line, value area, real volume at price (Premium), profile and delta at the swing, row height, lookback |
 | 10. Table | Position and size |
 
 Only sources at or above the chart timeframe are used. On a 1H chart that is 1H, 4H and Daily. On a 4H chart, 4H and Daily. A source finer than the chart is skipped, not approximated.
