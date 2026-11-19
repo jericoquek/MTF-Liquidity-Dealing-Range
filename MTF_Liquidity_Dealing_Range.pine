@@ -31,6 +31,13 @@
 //     shading as redundant.
 //   - Refinement ("most energetic swing") removed. Group 6 is now the
 //     delivery range.
+//   - LVN zones: thin rows in the swing profile, where little volume
+//     traded between two heavier areas. A row is an LVN when its volume
+//     (smoothed over three rows) is at most a set share of the lighter of
+//     the two peaks around it, and below the profile's average. Runs of
+//     LVN rows join into one zone, drawn as a band from the swing to the
+//     right edge. Rows at the range's own edges are skipped: they are thin
+//     by nature.
 //   - Swing delta and turn delta switch on and off separately. When Max
 //     lookback cuts the swing leg short, the totals under the swing
 //     delta say where it actually starts.
@@ -303,6 +310,9 @@ vcPocWid   = input.int(2, "", minval = 1, maxval = 4, inline = "vp", group = gVc
 vcVaShow   = input.bool(true, "Value area", inline = "va", group = gVc, tooltip = "VAH and VAL: the band around the POC that holds this share of the volume traded in the leg from the swing to the turn, built by adding the heavier neighbouring row, above or below, until the share is reached. Inside it the market accepted price; beyond it trade thinned out. Seventy is the classical figure. Below fifty it marks only the dense core around the POC; with small values, lower the row multiplier so the edges move in finer steps.")
 vcVaCol    = input.color(color.new(#E8A33D, 40), "", inline = "va", group = gVc)
 vcVaPct    = input.int(70, "%", minval = 20, maxval = 95, inline = "va", group = gVc)
+vcLvnShow  = input.bool(true, "LVN zones", inline = "lv", group = gVc, tooltip = "Low volume nodes in the swing profile: prices where little traded between two heavier areas. Price tends to move through them quickly. A row counts when its volume, smoothed over three rows, is at most this share of the lighter of the two peaks around it, and below the profile's average. Lower is stricter. Neighbouring LVN rows join into one zone. Rows at the very top and bottom of the range are skipped, since a range's edges are thin by nature. Up to 8 zones, the thinnest first.")
+vcLvnCol   = input.color(color.new(#7E57C2, 85), "", inline = "lv", group = gVc)
+vcLvnPct   = input.int(50, "% of nearer peak", minval = 10, maxval = 90, inline = "lv", group = gVc)
 vcFpOn     = input.bool(false, "Real volume at price", inline = "fp", group = gVc, tooltip = "Needs TradingView Premium or Ultimate. On: each candle's volume is placed at the prices it actually traded, from TradingView's footprint data, instead of being spread evenly across the candle's high to low. On a lower plan the script stops with an error while this is on - switch it off. Candles with no footprint data, such as history beyond what the plan provides, fall back to the even spread; the POC label's tooltip says how many candles used real data. Ticks per row sets the footprint's own row size: smaller is finer and slower.")
 vcFpTicks  = input.int(4, "ticks per row", minval = 1, maxval = 100, inline = "fp", group = gVc)
 vcProfShow  = input.bool(false, "Volume profile", inline = "vf", group = gVc, tooltip = "The histogram, drawn on the chart at the swing - the range's older extreme - and reaching right. It measures the leg from the swing to the range's turn, the newer extreme. Delta sits on the other side of the same line.")
@@ -1562,6 +1572,8 @@ var polyline vcDltUp = na
 var polyline vcDltDn = na
 var label    vcDltLb = na
 var label    vcDltSum = na
+var array<box>   vcLvnBx = array.new<box>()
+var array<label> vcLvnLb = array.new<label>()
 var polyline vcD2Up  = na
 var polyline vcD2Dn  = na
 var label    vcD2Lb  = na
@@ -1589,6 +1601,12 @@ if barstate.islast
     polyline.delete(vcDltDn)
     label.delete(vcDltLb)
     label.delete(vcDltSum)
+    for b in vcLvnBx
+        box.delete(b)
+    vcLvnBx.clear()
+    for lb in vcLvnLb
+        label.delete(lb)
+    vcLvnLb.clear()
     polyline.delete(vcD2Up)
     polyline.delete(vcD2Dn)
     label.delete(vcD2Lb)
@@ -1734,6 +1752,60 @@ if barstate.islast
                         vaV  += vaDn
                 vcVah := vBot + (vaHi + 1) * vBin
                 vcVal := vBot + vaLo * vBin
+
+                // LVN zones: a row is thin when its smoothed volume is at most
+                // vcLvnPct of the lighter of the peaks above and below it
+                // (looked for within a window of rows), and below the profile
+                // average. Runs of thin rows form one zone; edge rows skipped.
+                if vcLvnShow and vRows >= 12
+                    sm = array.new<float>(vRows, 0.0)
+                    for k = 0 to vRows - 1
+                        float a0 = array.get(bins, math.max(0, k - 1))
+                        float a1 = array.get(bins, k)
+                        float a2 = array.get(bins, math.min(vRows - 1, k + 1))
+                        array.set(sm, k, (a0 + a1 + a2) / 3.0)
+                    float avg  = vSum / vRows
+                    int   win  = math.max(3, int(math.round(vRows * 0.08)))
+                    int   edge = math.max(2, int(math.round(vRows * 0.04)))
+                    thin = array.new<bool>(vRows, false)
+                    for k = edge to vRows - 1 - edge
+                        float pUp = 0.0
+                        float pDn = 0.0
+                        for j = k + 1 to math.min(vRows - 1, k + win)
+                            pUp := math.max(pUp, array.get(sm, j))
+                        for j = math.max(0, k - win) to k - 1
+                            pDn := math.max(pDn, array.get(sm, j))
+                        float side = math.min(pUp, pDn)
+                        float v0   = array.get(sm, k)
+                        if side > 0 and v0 <= side * vcLvnPct / 100.0 and v0 < avg
+                            array.set(thin, k, true)
+                    // collect zones with their depth (thinnest first)
+                    zLo = array.new<int>()
+                    zHi = array.new<int>()
+                    zDp = array.new<float>()
+                    int k2 = 0
+                    while k2 < vRows
+                        if array.get(thin, k2)
+                            int z0 = k2
+                            float dp = 1e30
+                            while k2 < vRows and array.get(thin, k2)
+                                dp := math.min(dp, array.get(sm, k2))
+                                k2 += 1
+                            array.push(zLo, z0)
+                            array.push(zHi, k2 - 1)
+                            array.push(zDp, dp)
+                        else
+                            k2 += 1
+                    int nZ = math.min(8, array.size(zLo))
+                    if nZ > 0
+                        ordZ = array.sort_indices(zDp, order.ascending)
+                        int lvX1 = time[bar_index - vStart]
+                        for q = 0 to nZ - 1
+                            int   zi  = array.get(ordZ, q)
+                            float zBt = vBot + array.get(zLo, zi) * vBin
+                            float zTp = vBot + (array.get(zHi, zi) + 1) * vBin
+                            vcLvnBx.push(box.new(lvX1, zTp, xRight, zBt, xloc = xloc.bar_time, bgcolor = vcLvnCol, border_color = color.new(vcLvnCol, 100), border_width = 0))
+                            vcLvnLb.push(label.new(xRight, (zTp + zBt) / 2, "LVN", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = color.new(vcLvnCol, 0), size = f_size(lblSize), tooltip = "Low volume node " + fmt_tick(zBt) + " – " + fmt_tick(zTp) + ", in the swing profile from the swing to the turn."))
 
                 int vX1 = math.min(cHiT, cLoT)
                 if vcPocShow
